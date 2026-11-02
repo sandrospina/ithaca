@@ -63,7 +63,7 @@ Rust is used for environment simulation, level loading and compilation, rewards,
 Crates:
 
 -   `serde`, `serde_json`, `ron` — level files, configs, wire formats;
--   `rand`, `rand_chacha` — deterministic RNG;
+-   deterministic RNG: xoshiro256** implemented in `rl-core`, so no dependency upgrade can change replay streams;
 -   `fixed` — fixed-point arithmetic for the continuous Sea engine;
 -   `rayon` — parallel CPU simulation on workers;
 -   `tokio`, `axum` — coordinator and worker services;
@@ -790,21 +790,21 @@ Levels 14–16: 2v2, shared and centralised-critic team policies, communication,
 # 23. Immediate Backlog
 
 -   [x] Initialise git repository.
--   [ ] Create Cargo workspace.
--   [ ] Create `rl-core`: `World`, `WorldSpec`, `JointAction`, `StepResult`, `ActionMask`, `PolicyProvider`.
--   [ ] Implement seeded RNG.
--   [ ] Implement Grid engine and `LevelDef` (RON load, validate, compile).
--   [ ] Write Level 0 and Level 1 level files.
--   [ ] Add environment unit and property tests.
--   [ ] Add headless episode runner.
--   [ ] Implement random agent.
+-   [x] Create Cargo workspace.
+-   [x] Create `rl-core`: `World`, `WorldSpec`, `JointAction`, `StepResult`, `ActionMask`, `PolicyProvider`.
+-   [x] Implement seeded RNG.
+-   [x] Implement Grid engine and `LevelDef` (RON load, validate, compile).
+-   [x] Write Level 0 and Level 1 level files.
+-   [x] Add environment unit and property tests.
+-   [x] Add headless episode runner.
+-   [x] Implement random agent.
 -   [ ] Implement Q-learning agent with lesson-mode tracing.
 -   [ ] Add Q-learning regression test.
--   [ ] Create Leptos app with amber terminal shell and theme tokens.
--   [ ] Run simulation and training in a Web Worker.
--   [ ] Phosphor Canvas2D renderer and style-sheet scene.
--   [ ] Keyboard/manual control (Level 0).
--   [ ] Tutorial engine and Level 0–1 tutorials.
+-   [x] Create Leptos app with amber terminal shell and theme tokens.
+-   [ ] Run simulation and training in a Web Worker. *(Simulation done; training follows with Q-learning.)*
+-   [x] Phosphor Canvas2D renderer and style-sheet scene.
+-   [x] Keyboard/manual control (Level 0).
+-   [ ] Tutorial engine and Level 0–1 tutorials. *(Text steps, depths and highlights done; Level 0 tutorial complete; Level 1 has its briefing only.)*
 -   [ ] Train button, reward/episode graph, Q-value and policy views.
 -   [ ] Live pseudocode walkthrough.
 -   [ ] Learned-policy deployment.

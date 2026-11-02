@@ -1,0 +1,33 @@
+// Level 0 — Calypso's Loom (tutorial).
+// The player is the agent: they sail the raft by hand while the HUD names
+// every part of the RL loop. See docs/campaign.md and docs/tutorials.md.
+Level(
+  schema: 1,
+  id: "l00_calypsos_loom",
+  title: "Calypso's Loom",
+  engine: Grid(width: 5, height: 5, moves: Four),
+  map: [
+    "S....",
+    ".....",
+    ".....",
+    ".....",
+    "....G",
+  ],
+  legend: {
+    'S': Spawn(agent: "odysseus"),
+    'G': Goal(term: "goal_reached"),
+  },
+  agents: {
+    "odysseus": (controller: Learner, glyph: agent),
+  },
+  reward: { "goal_reached": 10.0, "step": -1.0 },
+  observation: [ self_position(encoding: Index) ],
+  termination: [ GoalReached ],
+  truncation: (max_steps: 50),
+  pilot: Player,
+  challenge: (
+    objective: "Sail the raft to the shore by the shortest route.",
+    goal: BestReturn,
+  ),
+  tutorial: "l00_calypsos_loom",
+)

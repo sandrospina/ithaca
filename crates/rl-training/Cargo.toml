@@ -1,0 +1,16 @@
+[package]
+name = "rl-training"
+description = "Episode runner, replay as seed + action log, evaluation."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+rl-core.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+rl-envs.workspace = true
+rl-agents.workspace = true
+proptest.workspace = true

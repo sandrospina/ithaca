@@ -1,0 +1,205 @@
+/* Reinforcement Odyssey — amber terminal shell.
+   Tokens mirror crates/rl-theme; a test keeps them in sync. */
+
+:root {
+  --shell-bg: #0B0906;
+  --shell-fg: #FFB000;
+  --shell-dim: #7A5400;
+  --shell-hi: #FFE08A;
+  --arena-bg: #040806;
+  --terrain: #33FF66;
+  --agent: #4DE8FF;
+  --adversary: #FF3D9A;
+  --goal: #FFD24D;
+  --hazard: #FF7A1A;
+  --policy: #C8FFD8;
+
+  --font-display: "VT323", ui-monospace, monospace;
+  --font-body: "IBM Plex Mono", ui-monospace, Menlo, monospace;
+  --glow: 0 0 6px rgba(255, 176, 0, 0.55);
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  background: var(--shell-bg);
+  color: var(--shell-fg);
+  font-family: var(--font-body);
+  font-size: 14px;
+}
+
+/* Subtle scanlines over the shell only; disabled in plain mode. */
+body:not(.plain)::after {
+  content: "";
+  pointer-events: none;
+  position: fixed;
+  inset: 0;
+  background: repeating-linear-gradient(to bottom, rgba(0, 0, 0, 0) 0, rgba(0, 0, 0, 0) 2px, rgba(0, 0, 0, 0.18) 3px);
+  z-index: 10;
+}
+
+body:not(.plain) .glow { text-shadow: var(--glow); }
+
+.app {
+  display: grid;
+  grid-template-rows: auto auto auto 1fr auto auto;
+  height: 100vh;
+  gap: 0;
+}
+
+.topbar, .phasebar, .statusbar {
+  display: flex;
+  align-items: center;
+  gap: 1.5rem;
+  padding: 0.4rem 1rem;
+  border-bottom: 1px solid var(--shell-dim);
+}
+
+.phasebar { border-top: 1px solid var(--shell-dim); border-bottom: none; }
+.statusbar { border-bottom: none; color: var(--shell-dim); font-size: 12px; }
+
+.title {
+  font-family: var(--font-display);
+  font-size: 28px;
+  letter-spacing: 0.05em;
+  color: var(--shell-hi);
+}
+
+.subtitle { color: var(--shell-dim); }
+
+.main {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 380px;
+  min-height: 0;
+}
+
+.arena-wrap {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--arena-bg);
+  border-right: 1px solid var(--shell-dim);
+  min-height: 0;
+  padding: 1rem;
+}
+
+.arena-wrap canvas { max-width: 100%; max-height: 100%; }
+
+.side {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.panel {
+  border-bottom: 1px solid var(--shell-dim);
+  padding: 0.75rem 1rem;
+}
+
+.panel h2 {
+  margin: 0 0 0.5rem 0;
+  font-family: var(--font-display);
+  font-weight: normal;
+  font-size: 20px;
+  color: var(--shell-hi);
+  letter-spacing: 0.05em;
+}
+
+.beat { color: var(--shell-dim); font-size: 12px; letter-spacing: 0.1em; }
+
+.tutorial-text { line-height: 1.5; min-height: 6.5em; }
+
+.hud {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0.25rem 1rem;
+}
+
+.hud .label { color: var(--shell-dim); letter-spacing: 0.08em; }
+.hud .label.hl, .hl-box { color: var(--shell-hi); outline: 1px solid var(--shell-hi); outline-offset: 2px; }
+.hud .value { color: var(--shell-fg); }
+
+button, select, input {
+  font-family: var(--font-body);
+  font-size: 13px;
+  background: var(--shell-bg);
+  color: var(--shell-fg);
+  border: 1px solid var(--shell-dim);
+  padding: 0.25rem 0.6rem;
+}
+
+button:hover:not(:disabled), button.active { border-color: var(--shell-fg); color: var(--shell-hi); }
+button:disabled { color: var(--shell-dim); border-color: #3a2a00; cursor: not-allowed; }
+button:focus-visible, input:focus-visible, select:focus-visible { outline: 1px solid var(--shell-hi); }
+
+input[type="number"] { width: 7em; }
+
+.row { display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; }
+
+.phase { letter-spacing: 0.15em; }
+
+.log {
+  font-size: 12px;
+  color: var(--shell-dim);
+  white-space: pre-wrap;
+  max-height: 9em;
+  overflow-y: auto;
+}
+
+.log .new { color: var(--shell-fg); }
+
+/* Voyage map: the campaign route from Ogygia to Ithaca. */
+.voyage {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.35rem 1rem;
+  border-bottom: 1px solid var(--shell-dim);
+  overflow-x: auto;
+  white-space: nowrap;
+}
+
+.voyage .port { font-family: var(--font-display); font-size: 18px; color: var(--shell-hi); letter-spacing: 0.08em; }
+.voyage .port.far { color: var(--shell-dim); }
+.voyage .route { color: var(--shell-dim); }
+.voyage .stop.done { color: var(--goal); border-color: var(--shell-dim); }
+.voyage .stop.active { border-color: var(--shell-hi); color: var(--shell-hi); }
+
+/* Objective strip. */
+.objective {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.4rem 1rem;
+  padding: 0.45rem 1rem;
+  border-bottom: 1px solid var(--shell-dim);
+  outline-offset: -3px;
+}
+
+.objective-label { color: var(--shell-dim); letter-spacing: 0.12em; }
+.objective-text { color: var(--shell-hi); }
+.objective-stats { color: var(--shell-fg); font-size: 12px; }
+
+.complete {
+  color: var(--goal);
+  border: 1px solid var(--goal);
+  padding: 0.1rem 0.5rem;
+  letter-spacing: 0.1em;
+}
+
+body:not(.plain) .complete.fresh { animation: pulse 1.2s ease-in-out 3; }
+
+@keyframes pulse {
+  50% { box-shadow: 0 0 14px rgba(255, 210, 77, 0.8); }
+}
+
+.sail-on, button.primary { border-color: var(--shell-fg); color: var(--shell-hi); }
+.sail-on:hover, button.primary:hover { background: #2a1d00; }
+
+.pilot { margin: 0.6rem 0; }
+
+button.quiet { border-color: transparent; color: var(--shell-dim); font-size: 12px; }
+button.quiet:hover { border-color: var(--shell-dim); }

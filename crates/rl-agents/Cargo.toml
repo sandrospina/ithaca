@@ -1,0 +1,10 @@
+[package]
+name = "rl-agents"
+description = "Agents: random, Q-learning, and later DQN, PPO, behaviour cloning, decision transformer."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+rl-core.workspace = true

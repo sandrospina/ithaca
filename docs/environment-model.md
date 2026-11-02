@@ -137,13 +137,19 @@ Level(
     reward: (terms: [ "step", "caught_by_opponent" ], range: (-20.0, 20.0)),
     hyperparameters: (alpha: (0.01, 1.0), gamma: (0.0, 0.999), epsilon: (0.0, 1.0)),
   ),
-  challenge: (metric: SuccessRate, threshold: 0.8, eval_episodes: 10, eval_seeds: Fixed(1000)),
+  pilot: Agent,                                              // who steers: Player (by hand) or Agent
+  challenge: (
+    objective: "Escape the cave in 8 of 10 test voyages.",  // shown in the objective strip
+    goal: SuccessRate(threshold: 0.8, eval_episodes: 10, eval_seeds: Fixed(1000)),
+  ),
   budget: (episodes: 2000, stars: [2000, 1000, 500]),
   tutorial: "l03_cyclops_cave",
 )
 ```
 
 Key points:
+- **`challenge`** pairs a one-sentence objective with a measurable goal. `BestReturn` goals compute their target from the map by shortest path, so the target can never drift out of date.
+- **`pilot`** says whether the player steers by hand or an agent steers while the player configures and watches.
 - **`player_editable`** states exactly what a player may change, and within which bounds. Everything else is locked. The coordinator enforces the same rules on jobs.
 - **Maps** can be ASCII for grids, polygons for the sea, or a **generator** with parameters (section 5).
 - **Glyphs** reference visual-style tokens only, so new levels cannot break visual consistency.

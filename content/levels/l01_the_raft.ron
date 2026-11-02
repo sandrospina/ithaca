@@ -1,0 +1,35 @@
+// Level 1 — The Raft. Tabular Q-learning on a deterministic 5×5 grid.
+Level(
+  schema: 1,
+  id: "l01_the_raft",
+  title: "The Raft",
+  engine: Grid(width: 5, height: 5, moves: Four),
+  map: [
+    "S....",
+    ".....",
+    ".....",
+    ".....",
+    "....G",
+  ],
+  legend: {
+    'S': Spawn(agent: "odysseus"),
+    'G': Goal(term: "goal_reached"),
+  },
+  agents: {
+    "odysseus": (controller: Learner, glyph: agent),
+  },
+  reward: { "goal_reached": 10.0, "step": -1.0 },
+  observation: [ self_position(encoding: Index) ],
+  termination: [ GoalReached ],
+  truncation: (max_steps: 100),
+  player_editable: (
+    hyperparameters: (alpha: (0.01, 1.0), gamma: (0.0, 0.999), epsilon: (0.0, 1.0)),
+  ),
+  pilot: Agent,
+  challenge: (
+    objective: "Train a raft that finds the shore on its own, in 9 of 10 test voyages.",
+    goal: SuccessRate(threshold: 0.9, eval_episodes: 10, eval_seeds: Fixed(1000)),
+  ),
+  budget: (episodes: 500, stars: [500, 200, 100]),
+  tutorial: "l01_the_raft",
+)

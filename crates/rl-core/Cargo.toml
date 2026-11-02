@@ -1,0 +1,13 @@
+[package]
+name = "rl-core"
+description = "World trait, specs, actions, observations and deterministic RNG. No graphics, UI or ML framework."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true

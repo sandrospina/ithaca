@@ -1,0 +1,10 @@
+[package]
+name = "rl-theme"
+description = "Visual-style tokens (docs/visual-style.md). No renderer may hard-code a colour."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+rl-core.workspace = true

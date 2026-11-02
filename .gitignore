@@ -1,6 +1,6 @@
 /target/
 **/*.rs.bk
 .DS_Store
-/dist/
+dist/
 /pkg/
 node_modules/

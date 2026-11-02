@@ -1,0 +1,38 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/rl-core",
+    "crates/rl-envs",
+    "crates/rl-agents",
+    "crates/rl-training",
+    "crates/rl-tutorial",
+    "crates/rl-theme",
+    "crates/rl-web",
+]
+
+[workspace.package]
+edition = "2024"
+version = "0.1.0"
+license = "UNLICENSED"
+publish = false
+
+[workspace.dependencies]
+rl-core = { path = "crates/rl-core" }
+rl-envs = { path = "crates/rl-envs" }
+rl-agents = { path = "crates/rl-agents" }
+rl-training = { path = "crates/rl-training" }
+rl-tutorial = { path = "crates/rl-tutorial" }
+rl-theme = { path = "crates/rl-theme" }
+serde = { version = "1", features = ["derive"] }
+ron = "0.12"
+thiserror = "2"
+proptest = "1"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+
+[profile.wasm-release]
+inherits = "release"
+opt-level = "z"
+codegen-units = 1

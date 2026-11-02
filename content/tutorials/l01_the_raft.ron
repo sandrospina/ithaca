@@ -1,0 +1,48 @@
+// Tutorial for Level 1 — The Raft.
+// The player hands the raft to an agent. Training (Q-learning) arrives in
+// Milestone 1; until then the level shows why learning is needed.
+Tutorial(
+  schema: 1,
+  id: "l01_the_raft",
+  level: "l01_the_raft",
+  steps: [
+    Say(
+      beat: Briefing,
+      title: "The Raft",
+      text: (
+        story: "You found the shore because you could see it. Now build a raft that finds it alone, knowing nothing but what each stroke earned.",
+        intuition: "Same sea, same rewards, same loop as Level 0. Only the pilot changes: from now on an agent steers, and your job is to make it learn. Your best voyage from Level 0 is the benchmark.",
+      ),
+      highlight: [Objective],
+    ),
+    Say(
+      beat: OldWayFails,
+      title: "A raft with no memory",
+      text: (
+        story: "Set a raft adrift with no memory, and it wanders wherever the waves push it.",
+        intuition: "Press WATCH RANDOM AGENT. This agent picks a direction at random every step and remembers nothing. Compare its return with yours.",
+        math: "The random policy is π(a|s) = 1/4 for every state s and action a. It ignores the state completely.",
+      ),
+      highlight: [Autopilot, Return, Step],
+    ),
+    Say(
+      beat: Explainer,
+      title: "What learning has to add",
+      text: (
+        story: "A good sailor remembers which stroke paid off in each stretch of water.",
+        intuition: "To do better, the agent must remember how good each move is in each cell: 25 cells × 4 moves = 100 numbers. That table is called the Q-table, and filling it in from rewards is Q-learning.",
+        math: "Q(s, a) estimates the return from taking action a in state s and acting well afterwards. The policy then picks argmax_a Q(s, a).",
+      ),
+      highlight: [State, Action],
+    ),
+    Say(
+      beat: Challenge,
+      title: "Train the raft",
+      text: (
+        story: "When the loom is ready, you will teach the raft yourself.",
+        intuition: "The goal is in the objective strip: a trained raft that reaches the shore in 9 of 10 test voyages. The TRAIN button unlocks with Q-learning in the next build.",
+      ),
+      highlight: [Objective],
+    ),
+  ],
+)

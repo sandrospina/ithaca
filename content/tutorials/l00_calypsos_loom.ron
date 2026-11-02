@@ -1,0 +1,76 @@
+// Tutorial for Level 0 — Calypso's Loom.
+// The player sails by hand while each part of the RL loop is named.
+Tutorial(
+  schema: 1,
+  id: "l00_calypsos_loom",
+  level: "l00_calypsos_loom",
+  steps: [
+    Say(
+      beat: Briefing,
+      title: "Calypso's Loom",
+      text: (
+        story: "Seven years on Ogygia. Before I let you go, you must learn how a sailor learns. Take the raft and find the far shore.",
+        intuition: "You are the agent. The sea is the environment. Reach the gold shore in as few moves as you can.",
+      ),
+      highlight: [Objective, Agent, Goal],
+    ),
+    Say(
+      beat: Explainer,
+      title: "Where you are: the state",
+      text: (
+        story: "The loom shows where your raft lies. That is all you know of the world right now.",
+        intuition: "The STATE is what the agent knows about the world at this moment. Here it is one number: the cell the raft is in.",
+        math: "The state s_t is the cell index y·W + x. With a 5×5 sea there are 25 possible states.",
+      ),
+      highlight: [State],
+    ),
+    Say(
+      beat: Explainer,
+      title: "What you do: the action",
+      text: (
+        story: "Steer with the arrow keys, or W A S D. Each push is one choice.",
+        intuition: "An ACTION is one choice from a fixed set: north, east, south or west. Steering into the edge wastes the move.",
+        math: "The action space A = {north, east, south, west}, so |A| = 4. At each step the agent picks a_t ∈ A.",
+      ),
+      highlight: [Action, Controls],
+    ),
+    Say(
+      beat: Explainer,
+      title: "What you get: the reward",
+      text: (
+        story: "Every stroke costs you strength. The shore rewards you well.",
+        intuition: "After each action the environment returns a REWARD: −1 for every move, +10 for reaching the shore.",
+        math: "r_{t+1} = −1 per step, plus 10 when s_{t+1} is the goal cell.",
+      ),
+      highlight: [Reward],
+    ),
+    Say(
+      beat: Explainer,
+      title: "What counts: the return",
+      text: (
+        story: "A good voyage is not one good stroke. It is the sum of all of them.",
+        intuition: "The RETURN adds up every reward in the EPISODE, from launch to shore. The shortest voyage has the highest return.",
+        math: "G = r_1 + r_2 + … + r_T. The shortest path takes 8 moves, so the best return is −8 + 10 = 2.",
+      ),
+      highlight: [Return, Step, Episode],
+    ),
+    Say(
+      beat: Challenge,
+      title: "Sail",
+      text: (
+        story: "Reach the shore by the shortest route. Calypso will know if you wander.",
+        intuition: "Reach the shore with the best possible return, shown in the objective strip. If you waste a move, press R to start a new episode.",
+      ),
+      highlight: [Objective, Return, Seed],
+    ),
+    Say(
+      beat: Debrief,
+      title: "The loop",
+      text: (
+        story: "You looked, you chose, the sea answered. Again and again. That loop is how every agent learns.",
+        intuition: "State → action → reward → new state, repeated until the episode ends. In the next level you hand over the oars: an agent runs this same loop by itself, thousands of times, and must learn the route you just found.",
+        math: "This is a Markov decision process: states S, actions A, transitions P(s'|s,a), rewards R(s,a). The agent's goal is to maximise the expected return.",
+      ),
+    ),
+  ],
+)

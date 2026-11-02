@@ -1,0 +1,17 @@
+[package]
+name = "rl-envs"
+description = "Data-driven level files, validation, compilation and world engines."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+rl-core.workspace = true
+serde.workspace = true
+ron.workspace = true
+thiserror.workspace = true
+indexmap = { version = "2", features = ["serde"] }
+
+[dev-dependencies]
+proptest.workspace = true
