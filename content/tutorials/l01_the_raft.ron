@@ -1,6 +1,7 @@
 // Tutorial for Level 1 — The Raft.
-// The player hands the raft to an agent. Training (Q-learning) arrives in
-// Milestone 1; until then the level shows why learning is needed.
+// The player hands the raft to an agent, measures what an untrained agent
+// can really do, and learns why luck is not learning. Training (Q-learning)
+// arrives in Milestone 1.
 Tutorial(
   schema: 1,
   id: "l01_the_raft",
@@ -11,7 +12,7 @@ Tutorial(
       title: "The Raft",
       text: (
         story: "You found the shore because you could see it. Now build a raft that finds it alone, knowing nothing but what each stroke earned.",
-        intuition: "Same sea, same rewards, same loop as Level 0. Only the pilot changes: from now on an agent steers, and your job is to make it learn. Your best voyage from Level 0 is the benchmark.",
+        intuition: "Same sea, same rewards, same loop as Level 0. Only the pilot changes: from now on an agent steers. First, find out what an agent with no learning at all can do.",
       ),
       highlight: [Objective],
     ),
@@ -26,11 +27,40 @@ Tutorial(
       highlight: [Autopilot, Return, Step],
     ),
     Say(
+      beat: GuidedExperiment,
+      title: "Measure, don't guess",
+      text: (
+        story: "One voyage tells you little. A hundred tell you what the raft really is.",
+        intuition: "Open ANALYSE and run at least 100 voyages, each with its own seed. Look at three things: how often it reaches the shore, how often it takes the shortest route, and whether the running mean of its return ever rises.",
+        math: "Each seed gives one sample of the return G. The batch estimates its distribution: mean, spread and quartiles. The running mean after k voyages is (G_1 + … + G_k) / k.",
+      ),
+      highlight: [Analyse],
+    ),
+    Say(
+      beat: GuidedExperiment,
+      title: "Luck is not learning",
+      text: (
+        story: "Among a hundred drifting rafts, one will look like a master sailor. Ask it to sail again, on a new sea.",
+        intuition: "The batch records the best seed. Press REPLAY BEST SEED: the same seed always gives exactly the same voyage. Then try the next seed and see how differently it sails.",
+        math: "The maximum of many samples grows with the number of samples, even when nothing improves. Selecting the best seed after the fact is not a policy.",
+      ),
+      highlight: [BestSeed],
+    ),
+    Say(
+      beat: Predict,
+      title: "Calypso's questions",
+      text: (
+        story: "Before you may build a raft that learns, show me you understand the one that cannot.",
+        intuition: "Answer the questions in ANALYSE. The answers come from your own batch, so read your statistics carefully.",
+      ),
+      highlight: [Quiz],
+    ),
+    Say(
       beat: Explainer,
       title: "What learning has to add",
       text: (
         story: "A good sailor remembers which stroke paid off in each stretch of water.",
-        intuition: "To do better, the agent must remember how good each move is in each cell: 25 cells × 4 moves = 100 numbers. That table is called the Q-table, and filling it in from rewards is Q-learning.",
+        intuition: "To beat the random agent, an agent must remember how good each move is in each cell: 25 cells × 4 moves = 100 numbers. That table is the Q-table, and filling it in from rewards is Q-learning.",
         math: "Q(s, a) estimates the return from taking action a in state s and acting well afterwards. The policy then picks argmax_a Q(s, a).",
       ),
       highlight: [State, Action],
@@ -40,7 +70,7 @@ Tutorial(
       title: "Train the raft",
       text: (
         story: "When the loom is ready, you will teach the raft yourself.",
-        intuition: "The goal is in the objective strip: a trained raft that reaches the shore in 9 of 10 test voyages. The TRAIN button unlocks with Q-learning in the next build.",
+        intuition: "The last task: a trained raft that takes the shortest route in 9 of 10 test voyages, something the random agent almost never does. The TRAIN button unlocks with Q-learning in the next build.",
       ),
       highlight: [Objective],
     ),

@@ -168,7 +168,7 @@ pub struct ChallengeDef {
     pub goal: GoalDef,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum GoalDef {
     /// The pilot must reach a goal with the best possible return. The target
     /// is computed from the map, so it can never drift out of date.
@@ -180,6 +180,84 @@ pub enum GoalDef {
         eval_episodes: u32,
         eval_seeds: EvalSeeds,
     },
+    /// Every task must be done, in any order.
+    Tasks(Vec<TaskDef>),
+}
+
+/// One task in a level's checklist.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum TaskDef {
+    /// Run the level's untrained agent over at least `min_episodes` seeds in one batch.
+    BatchRun { min_episodes: u32 },
+    /// Replay the best seed from the latest batch and see the same voyage again.
+    ReplayBestSeed,
+    /// Answer every question correctly. Answers come from the player's own batch.
+    Quiz { questions: Vec<QuestionDef> },
+    /// Train an agent that succeeds in `threshold` of `eval_episodes` test episodes.
+    TrainAgent {
+        threshold: f32,
+        eval_episodes: u32,
+        eval_seeds: EvalSeeds,
+        success: SuccessDef,
+    },
+}
+
+/// What counts as a successful test episode.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SuccessDef {
+    /// Reaching a goal before the step limit.
+    ReachGoal,
+    /// Reaching a goal with the best possible return, i.e. by the shortest route.
+    ShortestRoute,
+}
+
+/// A batch statistic a question can ask about.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BatchStat {
+    /// Share of episodes that reached a goal.
+    ReachedGoal,
+    /// Share of episodes that took the shortest route.
+    ShortestRoute,
+}
+
+/// Question kinds. A fixed vocabulary: questions are data, answers are computed.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum QuestionDef {
+    /// Which band contains a batch statistic? `bands` are ascending
+    /// boundaries in `[0, 1]`; each adjacent pair is one answer option.
+    StatBand {
+        prompt: String,
+        stat: BatchStat,
+        bands: Vec<f32>,
+        explain: String,
+    },
+    /// Which seed gave the best episode in the latest batch?
+    BestSeed { prompt: String, explain: String },
+    /// A conceptual multiple-choice question with a fixed answer.
+    Choice {
+        prompt: String,
+        options: Vec<String>,
+        answer: u32,
+        explain: String,
+    },
+}
+
+impl QuestionDef {
+    pub fn prompt(&self) -> &str {
+        match self {
+            QuestionDef::StatBand { prompt, .. }
+            | QuestionDef::BestSeed { prompt, .. }
+            | QuestionDef::Choice { prompt, .. } => prompt,
+        }
+    }
+
+    pub fn explain(&self) -> &str {
+        match self {
+            QuestionDef::StatBand { explain, .. }
+            | QuestionDef::BestSeed { explain, .. }
+            | QuestionDef::Choice { explain, .. } => explain,
+        }
+    }
 }
 
 /// Who steers the learning agent in this level.

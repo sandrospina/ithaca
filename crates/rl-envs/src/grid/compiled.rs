@@ -37,20 +37,38 @@ impl CompiledGrid {
     pub fn compile(def: &LevelDef) -> Result<Self, LevelErrors> {
         validate(def)?;
         let compiled = Self::build(def);
-        if matches!(
-            compiled.challenge,
-            Some(ChallengeDef {
-                goal: crate::level::GoalDef::BestReturn,
-                ..
-            })
-        ) && compiled.best_return(0).is_none()
-        {
+        if compiled.needs_best_return() && compiled.best_return(0).is_none() {
             return Err(LevelErrors(vec![crate::validate::LevelError::new(
                 "challenge",
-                "BestReturn needs a goal reachable within max_steps",
+                "this challenge measures the shortest route, so a goal must be reachable within max_steps",
             )]));
         }
         Ok(compiled)
+    }
+
+    /// Whether the challenge refers to the best possible return.
+    fn needs_best_return(&self) -> bool {
+        use crate::level::{BatchStat, GoalDef, QuestionDef, SuccessDef, TaskDef};
+        match self.challenge.as_ref().map(|c| &c.goal) {
+            Some(GoalDef::BestReturn) => true,
+            Some(GoalDef::Tasks(tasks)) => tasks.iter().any(|t| match t {
+                TaskDef::TrainAgent {
+                    success: SuccessDef::ShortestRoute,
+                    ..
+                } => true,
+                TaskDef::Quiz { questions } => questions.iter().any(|q| {
+                    matches!(
+                        q,
+                        QuestionDef::StatBand {
+                            stat: BatchStat::ShortestRoute,
+                            ..
+                        }
+                    )
+                }),
+                _ => false,
+            }),
+            _ => false,
+        }
     }
 
     fn build(def: &LevelDef) -> Self {

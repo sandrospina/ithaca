@@ -118,7 +118,10 @@ fn best_return_challenge_rejects_unreachable_goals() {
         .replace("truncation: (max_steps: 5),", "truncation: (max_steps: 5),\n  challenge: (objective: \"Reach it\", goal: BestReturn),");
     let def = LevelDef::parse(&walled_in).unwrap();
     let errors = rl_envs::GridWorld::compile(&def).unwrap_err();
-    assert!(errors.to_string().contains("reachable"), "{errors}");
+    assert!(
+        errors.to_string().contains("reachable within max_steps"),
+        "{errors}"
+    );
 }
 
 #[test]
@@ -130,4 +133,43 @@ fn best_return_challenge_needs_a_step_cost() {
     let def = LevelDef::parse(&free_steps).unwrap();
     let errors = rl_envs::GridWorld::compile(&def).unwrap_err();
     assert!(errors.to_string().contains("step reward"), "{errors}");
+}
+
+#[test]
+fn task_challenges_are_validated() {
+    let with = |goal: &str| {
+        let src = SMALL.replace(
+            "truncation: (max_steps: 5),",
+            &format!("truncation: (max_steps: 5),\n  pilot: Agent,\n  challenge: (objective: \"Measure\", goal: {goal}),"),
+        );
+        rl_envs::GridWorld::compile(&LevelDef::parse(&src).unwrap())
+    };
+    assert!(
+        with(
+            r#"Tasks([BatchRun(min_episodes: 100), ReplayBestSeed, Quiz(questions: [
+        StatBand(prompt: "How often?", stat: ShortestRoute, bands: [0.0, 0.5, 1.0], explain: "Because."),
+        BestSeed(prompt: "Which seed?", explain: "That one."),
+        Choice(prompt: "Why?", options: ["Luck", "Skill"], answer: 0, explain: "Luck."),
+    ]), TrainAgent(threshold: 0.9, eval_episodes: 10, eval_seeds: Fixed(1000), success: ShortestRoute)])"#
+        )
+        .is_ok()
+    );
+
+    let errors = with(
+        r#"Tasks([ReplayBestSeed, Quiz(questions: [
+        StatBand(prompt: "How often?", stat: ReachedGoal, bands: [0.5, 0.2], explain: "x"),
+        Choice(prompt: "Why?", options: ["Luck"], answer: 3, explain: "x"),
+    ])])"#,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(errors.contains("need a BatchRun task"), "{errors}");
+    assert!(errors.contains("bands must be"), "{errors}");
+    assert!(errors.contains("valid answer index"), "{errors}");
+    assert!(
+        with("Tasks([])")
+            .unwrap_err()
+            .to_string()
+            .contains("at least one task")
+    );
 }

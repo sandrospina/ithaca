@@ -27,8 +27,50 @@ Level(
   ),
   pilot: Agent,
   challenge: (
-    objective: "Train a raft that finds the shore on its own, in 9 of 10 test voyages.",
-    goal: SuccessRate(threshold: 0.9, eval_episodes: 10, eval_seeds: Fixed(1000)),
+    objective: "Measure what a raft with no memory can really do. Then train one that beats it.",
+    goal: Tasks([
+      BatchRun(min_episodes: 100),
+      ReplayBestSeed,
+      Quiz(questions: [
+        StatBand(
+          prompt: "In your batch, how often did the random agent reach the shore within the 100-move limit?",
+          stat: ReachedGoal,
+          bands: [0.0, 0.25, 0.5, 0.75, 1.0],
+          explain: "Given enough moves, even random wandering bumps into the shore. Reaching it is not the hard part.",
+        ),
+        StatBand(
+          prompt: "How often did it take the shortest route, the +2 voyage you sailed by hand?",
+          stat: ShortestRoute,
+          bands: [0.0, 0.01, 0.05, 0.25, 1.0],
+          explain: "Almost never. Only 70 of the 65,536 possible eight-move sequences are shortest routes: about 1 in 1,000.",
+        ),
+        BestSeed(
+          prompt: "Which seed gave the random agent its best voyage in your batch?",
+          explain: "The same seed always produces the same voyage. That is what makes experiments reproducible.",
+        ),
+        Choice(
+          prompt: "The random agent sails 10,000 more voyages. What happens to its average return?",
+          options: [
+            "It improves, because the agent gains experience.",
+            "It stays about the same, because the agent never uses its rewards.",
+            "It gets worse, because errors pile up.",
+          ],
+          answer: 1,
+          explain: "Experience only helps an agent that learns from it. The running-mean line stays flat however long you run.",
+        ),
+        Choice(
+          prompt: "Your best seed's voyage was far better than the average. What does that show?",
+          options: [
+            "The agent has started to learn the route.",
+            "Luck: with enough tries, random moves sometimes look skilful.",
+            "That seed makes the agent smarter.",
+          ],
+          answer: 1,
+          explain: "A best case found by trying many seeds is not a policy. A learned agent must do well on seeds it has never seen.",
+        ),
+      ]),
+      TrainAgent(threshold: 0.9, eval_episodes: 10, eval_seeds: Fixed(1000), success: ShortestRoute),
+    ]),
   ),
   budget: (episodes: 500, stars: [500, 200, 100]),
   tutorial: "l01_the_raft",

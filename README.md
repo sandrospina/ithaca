@@ -16,6 +16,9 @@ Milestone 0 is in place:
 
 - Campaign flow: a voyage map with locked levels, an objective strip, a completion moment, and progress saved in the browser.
   Level 0 is completed by sailing the shortest route by hand. Level 1 is agent-piloted: you watch a random agent fail against your benchmark.
+- ANALYSE view for agent-piloted levels: run the agent over up to 10,000 seeds, see return statistics,
+  a per-voyage chart with the running mean, a histogram, the best seed (replayable exactly), and Calypso's questions,
+  whose answers come from your own batch.
 
 Q-learning and the Configure / Train / Analyse / Deploy workflow arrive in Milestone 1.
 
@@ -77,6 +80,8 @@ Useful for testing and screenshots:
 ?plain=1              plain mode: no glow or trails
 ?unlock=all           open every level regardless of progress
 ?watch=1              start the agent sailing on load (agent-piloted levels)
+?view=analyse         open the ANALYSE view
+?batch=1000           run a batch of that many voyages on load
 ```
 
 Progress is stored in the browser's local storage. Use RESET PROGRESS in the status bar to start the campaign again.

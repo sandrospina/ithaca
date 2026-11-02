@@ -1,7 +1,8 @@
 //! Messages between the UI thread and the simulation worker.
 
 use rl_core::RenderModel;
-pub use rl_envs::Pilot;
+pub use rl_envs::{GoalDef, Pilot};
+pub use rl_training::BatchReport;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -15,11 +16,14 @@ pub enum SimRequest {
     /// The level's agent takes one step. Until training exists (Milestone 1)
     /// this is the random agent.
     AgentStep,
+    /// Runs the level's agent headlessly on seeds `first_seed..first_seed + episodes`.
+    Batch { first_seed: u64, episodes: u32 },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum SimResponse {
     Snapshot(Box<Snapshot>),
+    Batch(Box<BatchReport>),
     Error(String),
 }
 
@@ -41,15 +45,15 @@ pub enum SailedBy {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Objective {
     pub text: String,
-    pub goal: ObjectiveGoal,
+    pub goal: GoalDef,
+    /// The best possible return and the moves it takes, when a goal is reachable.
+    pub best_route: Option<BestRoute>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
-pub enum ObjectiveGoal {
-    /// Reach the goal with this return, the best possible (`moves` moves).
-    BestReturn { target: f32, moves: u32 },
-    /// A trained agent must succeed in `threshold` of `eval_episodes` test episodes.
-    SuccessRate { threshold: f32, eval_episodes: u32 },
+pub struct BestRoute {
+    pub episode_return: f32,
+    pub moves: u32,
 }
 
 /// How a baseline agent performs over many episodes.

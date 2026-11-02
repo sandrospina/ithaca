@@ -4,7 +4,9 @@
 use std::fmt;
 
 use crate::catalogue::RewardTerm;
-use crate::level::{EngineDef, GoalDef, LegendEntry, LevelDef, SCHEMA_VERSION, TerminationDef};
+use crate::level::{
+    EngineDef, GoalDef, LegendEntry, LevelDef, QuestionDef, SCHEMA_VERSION, TaskDef, TerminationDef,
+};
 
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 #[error("{field}: {message}")]
@@ -41,6 +43,8 @@ impl fmt::Display for LevelErrors {
 impl std::error::Error for LevelErrors {}
 
 pub const MAX_GRID_SIDE: u32 = 64;
+/// Largest batch of episodes a player can run at once.
+pub const MAX_BATCH_EPISODES: u32 = 10_000;
 
 /// What a map character means after applying built-ins and the legend.
 pub(crate) fn resolve_char<'a>(def: &'a LevelDef, c: char) -> Option<CellMeaning<'a>> {
@@ -62,6 +66,18 @@ pub(crate) enum CellMeaning<'a> {
     Wall,
     Spawn(&'a str),
     Goal(&'a str),
+}
+
+/// Problems with a success-rate goal's numbers.
+fn rate_problems(threshold: f32, eval_episodes: u32) -> Vec<&'static str> {
+    let mut problems = Vec::new();
+    if !(0.0..=1.0).contains(&threshold) {
+        problems.push("threshold must be in 0..=1");
+    }
+    if eval_episodes == 0 {
+        problems.push("eval_episodes must be at least 1");
+    }
+    problems
 }
 
 /// Checks a level definition. Returns every problem found, not just the first.
@@ -214,17 +230,14 @@ pub fn validate(def: &LevelDef) -> Result<(), LevelErrors> {
         if c.objective.trim().is_empty() {
             err("challenge", "objective must not be empty".into());
         }
-        match c.goal {
+        match &c.goal {
             GoalDef::SuccessRate {
                 threshold,
                 eval_episodes,
                 ..
             } => {
-                if !(0.0..=1.0).contains(&threshold) {
-                    err("challenge", "threshold must be in 0..=1".into());
-                }
-                if eval_episodes == 0 {
-                    err("challenge", "eval_episodes must be at least 1".into());
+                for problem in rate_problems(*threshold, *eval_episodes) {
+                    err("challenge", problem.into());
                 }
             }
             GoalDef::BestReturn => {
@@ -246,6 +259,89 @@ pub fn validate(def: &LevelDef) -> Result<(), LevelErrors> {
                     err(
                         "challenge",
                         "BestReturn needs a step reward of zero or less".into(),
+                    );
+                }
+            }
+            GoalDef::Tasks(tasks) => {
+                if tasks.is_empty() {
+                    err("challenge", "Tasks needs at least one task".into());
+                }
+                for (i, task) in tasks.iter().enumerate() {
+                    match task {
+                        TaskDef::BatchRun { min_episodes }
+                            if !(1..=MAX_BATCH_EPISODES).contains(min_episodes) =>
+                        {
+                            err(
+                                "challenge",
+                                format!("task {i}: min_episodes must be 1..={MAX_BATCH_EPISODES}"),
+                            );
+                        }
+                        TaskDef::TrainAgent {
+                            threshold,
+                            eval_episodes,
+                            ..
+                        } => {
+                            for problem in rate_problems(*threshold, *eval_episodes) {
+                                err("challenge", format!("task {i}: {problem}"));
+                            }
+                        }
+                        TaskDef::Quiz { questions } => {
+                            if questions.is_empty() {
+                                err(
+                                    "challenge",
+                                    format!("task {i}: a quiz needs at least one question"),
+                                );
+                            }
+                            for (q, question) in questions.iter().enumerate() {
+                                if question.prompt().trim().is_empty()
+                                    || question.explain().trim().is_empty()
+                                {
+                                    err(
+                                        "challenge",
+                                        format!(
+                                            "task {i}, question {q}: prompt and explain are required"
+                                        ),
+                                    );
+                                }
+                                match question {
+                                    QuestionDef::StatBand { bands, .. } => {
+                                        let ascending = bands.windows(2).all(|w| w[0] < w[1]);
+                                        let in_unit = bands.iter().all(|b| (0.0..=1.0).contains(b));
+                                        if bands.len() < 3 || !ascending || !in_unit {
+                                            err(
+                                                "challenge",
+                                                format!(
+                                                    "task {i}, question {q}: bands must be at least three ascending values in 0..=1"
+                                                ),
+                                            );
+                                        }
+                                    }
+                                    QuestionDef::Choice {
+                                        options, answer, ..
+                                    } => {
+                                        if options.len() < 2 || *answer as usize >= options.len() {
+                                            err(
+                                                "challenge",
+                                                format!(
+                                                    "task {i}, question {q}: needs two or more options and a valid answer index"
+                                                ),
+                                            );
+                                        }
+                                    }
+                                    QuestionDef::BestSeed { .. } => {}
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                let needs_batch = tasks
+                    .iter()
+                    .any(|t| matches!(t, TaskDef::ReplayBestSeed | TaskDef::Quiz { .. }));
+                if needs_batch && !tasks.iter().any(|t| matches!(t, TaskDef::BatchRun { .. })) {
+                    err(
+                        "challenge",
+                        "ReplayBestSeed and Quiz need a BatchRun task".into(),
                     );
                 }
             }

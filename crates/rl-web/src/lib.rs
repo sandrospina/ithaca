@@ -8,10 +8,13 @@
 //! - `app`: the Leptos UI shell.
 
 pub mod campaign;
+pub mod chart_math;
 pub mod content;
 pub mod protocol;
 pub mod sim;
 
+#[cfg(target_arch = "wasm32")]
+pub mod analyse;
 #[cfg(target_arch = "wasm32")]
 pub mod app;
 #[cfg(target_arch = "wasm32")]

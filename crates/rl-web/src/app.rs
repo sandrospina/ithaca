@@ -11,9 +11,13 @@ use rl_tutorial::{Beat, Depth, StepDef, TutorialDef, UiElement};
 use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::Closure;
 
-use crate::campaign::{Progress, STORAGE_KEY};
+use crate::analyse::{AnalyseCtx, analyse_view};
+use crate::campaign::{Answer, AnswerOutcome, Progress, STORAGE_KEY};
+use crate::chart_math::signed;
 use crate::content::{self, LEVELS};
-use crate::protocol::{ObjectiveGoal, Outcome, Pilot, SailedBy, SimRequest, SimResponse, Snapshot};
+use crate::protocol::{
+    BatchReport, GoalDef, Outcome, Pilot, SailedBy, SimRequest, SimResponse, Snapshot,
+};
 use crate::render::{self, Effects, Highlights, RenderState};
 use crate::worker::SimWorker;
 
@@ -24,10 +28,11 @@ const AUTOPILOT_MS: u64 = 90;
 enum View {
     Arena,
     StyleSheet,
+    Analyse,
 }
 
 /// Optional URL parameters, used for debugging and automated screenshots:
-/// `?level=l01_the_raft&seed=3&moves=EESS&step=2&view=stylesheet&plain=1&unlock=all&watch=1`.
+/// `?level=l01_the_raft&seed=3&moves=EESS&step=2&view=stylesheet&plain=1&unlock=all&watch=1&batch=100`.
 struct UrlParams {
     level: Option<String>,
     seed: Option<u64>,
@@ -37,6 +42,7 @@ struct UrlParams {
     tutorial_step: Option<usize>,
     unlock_all: bool,
     watch: bool,
+    batch: Option<u32>,
 }
 
 impl UrlParams {
@@ -47,10 +53,10 @@ impl UrlParams {
         Self {
             level: get("level"),
             seed: get("seed").and_then(|s| s.parse().ok()),
-            view: if get("view").as_deref() == Some("stylesheet") {
-                View::StyleSheet
-            } else {
-                View::Arena
+            view: match get("view").as_deref() {
+                Some("stylesheet") => View::StyleSheet,
+                Some("analyse") => View::Analyse,
+                _ => View::Arena,
             },
             plain: get("plain").as_deref() == Some("1"),
             moves: get("moves")
@@ -67,6 +73,7 @@ impl UrlParams {
             tutorial_step: get("step").and_then(|s| s.parse().ok()),
             unlock_all: get("unlock").as_deref() == Some("all"),
             watch: get("watch").as_deref() == Some("1"),
+            batch: get("batch").and_then(|b| b.parse().ok()),
         }
     }
 }
@@ -118,17 +125,20 @@ fn objective_stats(s: &Snapshot, progress: &Progress) -> String {
     let Some(objective) = &s.objective else {
         return String::new();
     };
-    match objective.goal {
-        ObjectiveGoal::BestReturn { target, moves } => {
-            let best = progress
+    match (&objective.goal, objective.best_route) {
+        (GoalDef::BestReturn, Some(best)) => {
+            let mine = progress
                 .best(&s.level_id)
-                .map_or("—".into(), |b| format!("{b:+}"));
+                .map_or("—".into(), |b| signed(f64::from(b)));
             format!(
-                "best possible {target:+} in {moves} moves · this voyage {:+} after {} moves · your best {best}",
-                s.episode_return, s.step
+                "best possible {} in {} moves · this voyage {} after {} moves · your best {mine}",
+                signed(f64::from(best.episode_return)),
+                best.moves,
+                signed(f64::from(s.episode_return)),
+                s.step
             )
         }
-        ObjectiveGoal::SuccessRate { .. } => {
+        _ => {
             let mut parts = Vec::new();
             if let Some(prev) = level_index(&s.level_id)
                 .and_then(|i| i.checked_sub(1))
@@ -136,19 +146,19 @@ fn objective_stats(s: &Snapshot, progress: &Progress) -> String {
                 && let Some(best) = progress.best(prev.id)
             {
                 parts.push(format!(
-                    "your best by hand in {}: {best:+}",
-                    prev.menu_label
+                    "your best by hand in {}: {}",
+                    prev.menu_label,
+                    signed(f64::from(best))
                 ));
             }
             if let Some(b) = s.random_baseline {
                 parts.push(format!(
-                    "random agent over {} voyages: reaches the shore {:.0}% · mean return {:+.1}",
+                    "random agent over {} voyages: reaches the shore {:.0}% · mean return {}",
                     b.episodes,
                     b.success_rate * 100.0,
-                    b.mean_return
+                    signed(f64::from(b.mean_return))
                 ));
             }
-            parts.push("TRAIN unlocks with Q-learning in Milestone 1".into());
             parts.join(" · ")
         }
     }
@@ -170,16 +180,23 @@ pub fn App() -> impl IntoView {
     let level_id = RwSignal::new(LEVELS[initial].id.to_string());
 
     let snapshot = RwSignal::new(None::<Snapshot>);
+    let just_completed = RwSignal::new(false);
+    let report = RwSignal::new(None::<BatchReport>);
+    let batch_running = RwSignal::new(false);
+    let batch_size = RwSignal::new(100u32);
+    let batch_first_seed = RwSignal::new(1u64);
+    let feedback =
+        RwSignal::new(std::collections::BTreeMap::<(usize, usize), AnswerOutcome>::new());
     let error = RwSignal::new(None::<String>);
     let seed = RwSignal::new(params.seed.unwrap_or(1));
     let view = RwSignal::new(params.view);
     let plain = RwSignal::new(params.plain);
     let depth = RwSignal::new(Depth::Intuition);
     let tutorial_index = RwSignal::new(0usize);
-    let just_completed = RwSignal::new(false);
     let pending_moves = StoredValue::new(Some(params.moves));
     let pending_step = StoredValue::new(params.tutorial_step);
     let pending_watch = StoredValue::new(params.watch);
+    let pending_batch = StoredValue::new(params.batch);
 
     // ---- simulation worker
     let bridge = SimWorker::spawner()
@@ -188,7 +205,25 @@ pub fn App() -> impl IntoView {
                 error.set(None);
                 snapshot.set(Some(*s));
             }
-            SimResponse::Error(e) => error.set(Some(e)),
+            SimResponse::Batch(r) => {
+                batch_running.set(false);
+                let r = *r;
+                let newly = snapshot.with_untracked(|s| {
+                    let s = s.as_ref()?;
+                    let goal = &s.objective.as_ref()?.goal;
+                    let mut newly = false;
+                    progress.update(|p| newly = p.record_batch(&s.level_id, goal, &r));
+                    Some(newly)
+                });
+                if newly == Some(true) {
+                    just_completed.set(true);
+                }
+                report.set(Some(r));
+            }
+            SimResponse::Error(e) => {
+                batch_running.set(false);
+                error.set(Some(e));
+            }
         })
         // Trunk builds the worker as a classic (non-module) script.
         .as_module(false)
@@ -259,6 +294,13 @@ pub fn App() -> impl IntoView {
         let id = level_id.get();
         stop_autopilot();
         just_completed.set(false);
+        report.set(None);
+        feedback.set(Default::default());
+        view.update(|v| {
+            if *v == View::Analyse && pending_batch.with_value(Option::is_none) {
+                *v = View::Arena;
+            }
+        });
         tutorial_index.set(
             pending_step
                 .try_update_value(|s| s.take())
@@ -282,6 +324,14 @@ pub fn App() -> impl IntoView {
         {
             start_autopilot();
         }
+        if let Some(episodes) = pending_batch.try_update_value(Option::take).flatten() {
+            batch_size.set(episodes);
+            batch_running.set(true);
+            send(SimRequest::Batch {
+                first_seed: batch_first_seed.get_untracked(),
+                episodes,
+            });
+        }
     });
 
     // ---- campaign progress
@@ -301,9 +351,21 @@ pub fn App() -> impl IntoView {
         }
         recorded.set_value(Some(key));
         let mut newly_completed = false;
-        progress.update(|p| newly_completed = p.record(&s));
+        match s.sailed_by {
+            SailedBy::RandomAgent => report.with_untracked(|r| {
+                if let Some(r) = r {
+                    progress.update(|p| newly_completed = p.record_replay(&s, r));
+                }
+            }),
+            _ => progress.update(|p| newly_completed = p.record(&s)),
+        }
         if newly_completed {
             just_completed.set(true);
+        }
+    });
+    // A completed level opens its debrief.
+    Effect::new(move |_| {
+        if just_completed.get() {
             let debrief = tutorial.with_untracked(|t| {
                 t.as_ref()
                     .and_then(|t| t.steps.iter().position(|s| s.beat() == Beat::Debrief))
@@ -313,6 +375,60 @@ pub fn App() -> impl IntoView {
             }
         }
     });
+
+    // ---- analyse: batch experiments and questions
+    let analyse_ctx = AnalyseCtx {
+        report,
+        running: batch_running,
+        batch_size,
+        first_seed: batch_first_seed,
+        snapshot,
+        progress,
+        feedback,
+        highlights,
+        run_batch: Callback::new(move |()| {
+            batch_running.set(true);
+            send(SimRequest::Batch {
+                first_seed: batch_first_seed.get_untracked(),
+                episodes: batch_size.get_untracked(),
+            });
+        }),
+        replay_best: Callback::new(move |best_seed: u64| {
+            seed.set(best_seed);
+            view.set(View::Arena);
+            start_autopilot();
+        }),
+        submit_answer: Callback::new(move |(task, question, answer): (usize, usize, Answer)| {
+            let Some((level, goal)) = snapshot.with_untracked(|s| {
+                s.as_ref()
+                    .and_then(|s| Some((s.level_id.clone(), s.objective.as_ref()?.goal.clone())))
+            }) else {
+                return;
+            };
+            let mut result = (AnswerOutcome::Incorrect, false);
+            report.with_untracked(|r| {
+                progress.update(|p| {
+                    result = p.answer(&level, &goal, (task, question), answer, r.as_ref())
+                });
+            });
+            feedback.update(|f| {
+                f.insert((task, question), result.0);
+            });
+            if result.1 {
+                just_completed.set(true);
+            }
+        }),
+    };
+    let task_states = move || {
+        snapshot.with(|s| {
+            s.as_ref()
+                .and_then(|s| {
+                    let goal = &s.objective.as_ref()?.goal;
+                    Some(progress.with(|p| p.task_states(&s.level_id, goal)))
+                })
+                .unwrap_or_default()
+        })
+    };
     let level_complete = move || progress.with(|p| p.is_complete(&level_id.get()));
     let next_level = move || {
         level_index(&level_id.get())
@@ -396,6 +512,7 @@ pub fn App() -> impl IntoView {
             };
             match view.get_untracked() {
                 View::StyleSheet => render::draw_style_sheet(&ctx, now, fx),
+                View::Analyse => {}
                 View::Arena => snapshot.with_untracked(|s| {
                     if let Some(s) = s {
                         let hl = highlights.with_untracked(|h| Highlights {
@@ -484,6 +601,22 @@ pub fn App() -> impl IntoView {
                         snapshot.with(|s| s.as_ref().map(|s| progress.with(|p| objective_stats(s, p)))).unwrap_or_default()
                     }}
                 </span>
+                <span class="tasks">
+                    {move || {
+                        task_states()
+                            .into_iter()
+                            .map(|t| {
+                                let glyph = if t.done { "✓" } else if t.available { "○" } else { "■" };
+                                let note = if t.available { "" } else { " · unlocks with Q-learning" };
+                                view! {
+                                    <span class="task" class:done=t.done class:locked=!t.available>
+                                        {format!("{glyph} {}{note}", t.label)}
+                                    </span>
+                                }
+                            })
+                            .collect_view()
+                    }}
+                </span>
                 {move || {
                     level_complete()
                         .then(|| {
@@ -508,9 +641,16 @@ pub fn App() -> impl IntoView {
             </section>
 
             <main class="main">
-                <section class="arena-wrap" class:hl-box=move || is_hl(UiElement::Arena)>
-                    <canvas node_ref=canvas_ref width="720" height="720" aria-label="Arena"></canvas>
-                </section>
+                <div class="stage">
+                    <section
+                        class="arena-wrap"
+                        class:hl-box=move || is_hl(UiElement::Arena)
+                        style:display=move || if view.get() == View::Analyse { "none" } else { "flex" }
+                    >
+                        <canvas node_ref=canvas_ref width="720" height="720" aria-label="Arena"></canvas>
+                    </section>
+                    {move || (view.get() == View::Analyse).then(|| analyse_view(analyse_ctx))}
+                </div>
 
                 <aside class="side">
                     <section class="panel">
@@ -562,10 +702,10 @@ pub fn App() -> impl IntoView {
                             <span class="value">{snap_text(|s| s.last_action.clone().unwrap_or("—".into()))}</span>
                             <span class="label" class:hl=move || is_hl(UiElement::Reward)>"REWARD"</span>
                             <span class="value">
-                                {snap_text(|s| s.last_reward.map_or("—".into(), |r| format!("{r:+}")))}
+                                {snap_text(|s| s.last_reward.map_or("—".into(), |r| signed(f64::from(r))))}
                             </span>
                             <span class="label" class:hl=move || is_hl(UiElement::Return)>"RETURN"</span>
-                            <span class="value">{snap_text(|s| format!("{:+}", s.episode_return))}</span>
+                            <span class="value">{snap_text(|s| signed(f64::from(s.episode_return)))}</span>
                             <span class="label" class:hl=move || is_hl(UiElement::Step)>"STEP"</span>
                             <span class="value">{snap_text(|s| format!("{} / {}", s.step, s.max_steps))}</span>
                             <span class="label" class:hl=move || is_hl(UiElement::Episode)>"EPISODE"</span>
@@ -655,10 +795,21 @@ pub fn App() -> impl IntoView {
             </main>
 
             <nav class="phasebar">
-                {["CONFIGURE", "TRAIN", "ANALYSE", "DEPLOY"]
+                {["CONFIGURE", "TRAIN"]
                     .into_iter()
                     .map(|p| view! { <button class="phase" disabled=true title="Unlocks with Q-learning in Milestone 1">{p}</button> })
                     .collect_view()}
+                <button
+                    class="phase"
+                    class:active=move || view.get() == View::Analyse
+                    class:hl-box=move || is_hl(UiElement::Analyse)
+                    disabled=move || pilot() != Some(Pilot::Agent)
+                    title=move || if pilot() == Some(Pilot::Agent) { "Run batch experiments on the agent" } else { "In this level you are the pilot" }
+                    on:click=move |_| view.set(View::Analyse)
+                >
+                    "ANALYSE"
+                </button>
+                <button class="phase" disabled=true title="Unlocks with Q-learning in Milestone 1">"DEPLOY"</button>
             </nav>
             <footer class="statusbar">
                 <span>"TRAINING ON: local · simulation in Web Worker"</span>

@@ -70,6 +70,12 @@ pub enum UiElement {
     Objective,
     /// The button that lets an agent sail while the player watches.
     Autopilot,
+    /// The ANALYSE phase: batch experiments and statistics.
+    Analyse,
+    /// The best seed and its replay button.
+    BestSeed,
+    /// The level's questions.
+    Quiz,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

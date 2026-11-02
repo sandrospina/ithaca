@@ -10,7 +10,10 @@ pub mod level;
 pub mod validate;
 
 pub use grid::{Direction, GridWorld};
-pub use level::{ChallengeDef, GoalDef, LevelDef, Pilot};
+pub use level::{
+    BatchStat, ChallengeDef, EvalSeeds, GoalDef, LevelDef, Pilot, QuestionDef, SuccessDef, TaskDef,
+};
+pub use validate::MAX_BATCH_EPISODES;
 pub use validate::{LevelError, LevelErrors};
 
 /// Parses, validates and compiles a level file into a playable world.

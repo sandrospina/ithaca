@@ -3,15 +3,43 @@
 
 use rl_agents::RandomAgent;
 use rl_core::{Action, ActionSpace, PolicyProvider, Rng, StepEvent, World};
-use rl_envs::{GoalDef, GridWorld, Pilot};
+use rl_envs::{GridWorld, MAX_BATCH_EPISODES, Pilot};
 
 use crate::content;
 use crate::protocol::{
-    Baseline, Objective, ObjectiveGoal, Outcome, SailedBy, SimRequest, SimResponse, Snapshot,
+    Baseline, BestRoute, Objective, Outcome, SailedBy, SimRequest, SimResponse, Snapshot,
 };
+use rl_training::{BatchEpisode, BatchReport};
 
 /// Episodes used to measure the random agent's baseline on a level.
 pub const BASELINE_EPISODES: u32 = 100;
+
+/// The random agent's own random stream for an episode. Live play and batch
+/// runs both use it, so a batch's best seed replays exactly.
+pub fn agent_rng(seed: u64) -> Rng {
+    Rng::new(seed).fork(0x5241_4654) // "RAFT"
+}
+
+/// Plays one full episode with the random agent on `seed`.
+pub fn random_episode(world: &mut GridWorld, seed: u64) -> BatchEpisode {
+    let mut agent = RandomAgent;
+    let mut rng = agent_rng(seed);
+    world.reset(seed);
+    let mut episode_return = 0.0;
+    loop {
+        let action = agent.act(&world.observe(0), &world.action_mask(0), &mut rng);
+        let r = world.step(&vec![action]);
+        episode_return += r.agents[0].reward;
+        if r.done() {
+            return BatchEpisode {
+                seed,
+                episode_return,
+                length: world.step_count(),
+                reached_goal: r.agents[0].terminated,
+            };
+        }
+    }
+}
 
 #[derive(Default)]
 pub struct SimCore {
@@ -34,6 +62,10 @@ pub struct SimCore {
 impl SimCore {
     pub fn handle(&mut self, request: SimRequest) -> SimResponse {
         match request {
+            SimRequest::Batch {
+                first_seed,
+                episodes,
+            } => return self.batch(first_seed, episodes),
             SimRequest::Load { level_id, seed } => {
                 if let Err(e) = self.load(&level_id) {
                     return SimResponse::Error(e);
@@ -74,28 +106,43 @@ impl SimCore {
         SimResponse::Snapshot(Box::new(self.snapshot()))
     }
 
+    /// Runs the random agent over consecutive seeds without touching the
+    /// live episode.
+    pub fn batch(&self, first_seed: u64, episodes: u32) -> SimResponse {
+        let Some(world) = &self.world else {
+            return SimResponse::Error("no level loaded".into());
+        };
+        if world.grid().pilot != Pilot::Agent {
+            return SimResponse::Error("batch runs are for agent-piloted levels".into());
+        }
+        let episodes = episodes.clamp(1, MAX_BATCH_EPISODES);
+        let mut probe = world.clone();
+        let results = (0..u64::from(episodes))
+            .map(|i| random_episode(&mut probe, first_seed.wrapping_add(i)))
+            .collect();
+        let best = world.grid().best_return(0).map(|(r, _)| r);
+        match BatchReport::new("random agent", results, best) {
+            Some(report) => SimResponse::Batch(Box::new(report)),
+            None => SimResponse::Error("empty batch".into()),
+        }
+    }
+
     fn load(&mut self, level_id: &str) -> Result<(), String> {
         let entry =
             content::level(level_id).ok_or_else(|| format!("unknown level \"{level_id}\""))?;
         let world =
             rl_envs::load_world(entry.level_source).map_err(|e| format!("{level_id}: {e}"))?;
         let grid = world.grid();
+        let best_route = grid
+            .best_return(0)
+            .map(|(episode_return, moves)| BestRoute {
+                episode_return,
+                moves,
+            });
         self.objective = grid.challenge.as_ref().map(|c| Objective {
             text: c.objective.clone(),
-            goal: match c.goal {
-                GoalDef::BestReturn => {
-                    let (target, moves) = grid.best_return(0).expect("validated at compile time");
-                    ObjectiveGoal::BestReturn { target, moves }
-                }
-                GoalDef::SuccessRate {
-                    threshold,
-                    eval_episodes,
-                    ..
-                } => ObjectiveGoal::SuccessRate {
-                    threshold,
-                    eval_episodes,
-                },
-            },
+            goal: c.goal.clone(),
+            best_route,
         });
         self.random_baseline = (grid.pilot == Pilot::Agent).then(|| {
             let mut probe = world.clone();
@@ -122,7 +169,7 @@ impl SimCore {
     fn reset(&mut self, seed: u64) {
         let world = self.world.as_mut().expect("checked");
         world.reset(seed);
-        self.policy_rng = Some(Rng::new(seed).fork(0x5241_4654)); // "RAFT"
+        self.policy_rng = Some(agent_rng(seed));
         self.sailed_by = Some(SailedBy::Nobody);
         self.seed = seed;
         self.episode += 1;
@@ -212,7 +259,7 @@ mod tests {
     fn snap(r: SimResponse) -> Snapshot {
         match r {
             SimResponse::Snapshot(s) => *s,
-            SimResponse::Error(e) => panic!("{e}"),
+            other => panic!("expected a snapshot, got {other:?}"),
         }
     }
 
@@ -232,10 +279,12 @@ mod tests {
             (1, 0, (0, 0), Some(25))
         );
         assert_eq!(s.pilot, Pilot::Player);
+        let objective = s.objective.as_ref().unwrap();
+        assert_eq!(objective.goal, rl_envs::GoalDef::BestReturn);
         assert_eq!(
-            s.objective.as_ref().map(|o| o.goal),
-            Some(ObjectiveGoal::BestReturn {
-                target: 2.0,
+            objective.best_route,
+            Some(BestRoute {
+                episode_return: 2.0,
                 moves: 8
             })
         );
@@ -293,6 +342,45 @@ mod tests {
         let a = run(&mut sim);
         assert_eq!(a, run(&mut sim));
         assert_eq!(a.2, SailedBy::RandomAgent);
+    }
+
+    #[test]
+    fn batch_best_seed_replays_exactly_in_live_play() {
+        let mut sim = SimCore::default();
+        load(&mut sim, "l01_the_raft");
+        let SimResponse::Batch(report) = sim.handle(SimRequest::Batch {
+            first_seed: 1,
+            episodes: 200,
+        }) else {
+            panic!("expected a batch report");
+        };
+        assert_eq!(report.episodes.len(), 200);
+        assert_eq!(report.first_seed, 1);
+        let best = *report.best_episode();
+        assert!(best.episode_return >= report.returns.max);
+
+        sim.handle(SimRequest::Reset { seed: best.seed });
+        let mut s = snap(sim.handle(SimRequest::AgentStep));
+        while s.outcome == Outcome::Sailing {
+            s = snap(sim.handle(SimRequest::AgentStep));
+        }
+        assert_eq!(
+            (s.seed, s.step, s.episode_return),
+            (best.seed, best.length, best.episode_return)
+        );
+    }
+
+    #[test]
+    fn batch_runs_only_on_agent_levels() {
+        let mut sim = SimCore::default();
+        load(&mut sim, "l00_calypsos_loom");
+        assert!(matches!(
+            sim.handle(SimRequest::Batch {
+                first_seed: 0,
+                episodes: 10
+            }),
+            SimResponse::Error(_)
+        ));
     }
 
     #[test]

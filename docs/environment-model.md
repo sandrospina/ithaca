@@ -149,6 +149,7 @@ Level(
 
 Key points:
 - **`challenge`** pairs a one-sentence objective with a measurable goal. `BestReturn` goals compute their target from the map by shortest path, so the target can never drift out of date.
+- **Goals** are `BestReturn`, `SuccessRate`, or `Tasks([...])`: a checklist of `BatchRun`, `ReplayBestSeed`, `Quiz` and `TrainAgent` tasks. Quiz questions use a fixed set of kinds (`StatBand`, `BestSeed`, `Choice`) whose correct answers are computed from the player's own batch, so a level can test understanding without hard-coding numbers.
 - **`pilot`** says whether the player steers by hand or an agent steers while the player configures and watches.
 - **`player_editable`** states exactly what a player may change, and within which bounds. Everything else is locked. The coordinator enforces the same rules on jobs.
 - **Maps** can be ASCII for grids, polygons for the sea, or a **generator** with parameters (section 5).
