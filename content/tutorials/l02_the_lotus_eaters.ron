@@ -1,0 +1,78 @@
+// Tutorial for Level 2 — The Lotus-Eaters. Reward engineering.
+// Every reward setting suggested here is pinned by crates/rl-training/tests/lotus_eaters.rs.
+Tutorial(
+  schema: 1,
+  id: "l02_the_lotus_eaters",
+  level: "l02_the_lotus_eaters",
+  steps: [
+    Say(
+      beat: Briefing,
+      title: "The Lotus-Eaters",
+      text: (
+        story: "On this shore grows the lotus. Whoever tastes it forgets home and wishes only to stay. Your crew will want what the sea rewards, nothing more.",
+        intuition: "A bigger sea with rocks, whirlpools and a lotus field. The raft maximises exactly what the reward says. In this level you write the reward.",
+      ),
+      highlight: [Objective, Arena],
+    ),
+    Say(
+      beat: Explainer,
+      title: "Reading the sea",
+      text: (
+        story: "Rocks scrape the hull. Whirlpools swallow rafts whole. The lotus is sweet.",
+        intuition: "Hatched cells are rocks: each move on them costs reward. Double-hatched cells are whirlpools: they end the voyage. The gold flowers are the lotus field: each move inside pays a little. The shortcut to the shore crosses the rocks; a longer detour avoids them.",
+        math: "The reward per step is r = w_step + w_hazard·[on rocks] + w_lure·[in lotus], plus w_goal at the shore or w_death in a whirlpool. You choose the weights w.",
+      ),
+      highlight: [Arena],
+    ),
+    Say(
+      beat: GuidedExperiment,
+      title: "Train with the defaults",
+      text: (
+        story: "First, see what the crew does with the rewards as Calypso set them.",
+        intuition: "Open TRAIN and train for 800 episodes, then open DEPLOY and test the raft. It should reach the shore. Watch which way it goes.",
+        math: "Q-learning estimates the discounted return of each move, then the deployed raft always takes the move with the highest estimate.",
+      ),
+      highlight: [Train, Deploy],
+    ),
+    Say(
+      beat: Predict,
+      title: "Sweeten the lotus",
+      text: (
+        story: "What if the lotus tasted sweeter than home?",
+        intuition: "Predict first: if each move in the lotus pays +5, will the raft still go home? Then open CONFIGURE, set the lotus reward to +5, apply to start a new raft, train it and deploy it.",
+        math: "Staying pays 5 − 1 = +4 per step. With γ = 0.95 that is worth about 4 / (1 − γ) = 80, while the shore, 11 or more moves away, is worth at most 100 · 0.95^11 ≈ 57.",
+      ),
+      highlight: [Rewards],
+    ),
+    Say(
+      beat: GuidedExperiment,
+      title: "Make death cheap",
+      text: (
+        story: "A crew rowing in agony will take any way out.",
+        intuition: "Now make every move cost −10, a whirlpool only −10, and the shore pay +10. Train and deploy. Count the moves of a voyage before you laugh.",
+        math: "Dying at once costs −10 − 10 = −20. Reaching the shore costs at least 13 · (−10) + 10 = −120. The raft picks the larger number.",
+      ),
+      highlight: [Rewards, Deploy],
+    ),
+    Say(
+      beat: Challenge,
+      title: "Bring them home safely",
+      text: (
+        story: "Now write a reward that says what you mean: home, whole, and soon.",
+        intuition: "Reset the rewards to sensible values and make the rocks hurt enough that the raft takes the safe detour. Remember that the detour is four moves longer, and that reaching home later is worth less after discounting. Finally, answer Calypso's questions in ANALYSE.",
+        math: "The detour wins when the rock penalty exceeds the cost of four extra steps plus the discount lost on the shore reward: roughly 4 + 100 · (0.95^13 − 0.95^17).",
+      ),
+      highlight: [Rewards, Analyse, Objective],
+    ),
+    Say(
+      beat: Debrief,
+      title: "The agent did its job",
+      text: (
+        story: "Your crews were never foolish. They did exactly what you asked. The fault, each time, was in the asking.",
+        intuition: "Every broken raft maximised its reward perfectly. Reward hacking, also called specification gaming, is a design error, not a learning error. In real systems it is one of the hardest problems in RL: the reward must say what you mean, including the things you forgot to say.",
+        math: "The agent solves max_π E[Σ γ^t r_t]. It has no access to your intentions, only to r. Any gap between r and what you want is a gap the optimiser is free to exploit.",
+      ),
+      highlight: [Objective],
+    ),
+  ],
+)

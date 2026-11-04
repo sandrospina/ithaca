@@ -1,8 +1,8 @@
 //! Runtime grid world.
 
 use rl_core::{
-    Action, ActionMask, AgentId, JointAction, Observation, RenderAgent, RenderEvent, RenderModel,
-    Rng, StepEvent, StepInfo, StepResult, StepResults, World, WorldSpec,
+    Action, ActionMask, AgentId, JointAction, Observation, RenderAgent, RenderEvent, RenderModel, Rng, StepEvent,
+    StepInfo, StepResult, StepResults, World, WorldSpec,
 };
 
 use super::compiled::CompiledGrid;
@@ -20,12 +20,7 @@ pub enum Direction {
 }
 
 impl Direction {
-    pub const ALL: [Direction; 4] = [
-        Direction::North,
-        Direction::East,
-        Direction::South,
-        Direction::West,
-    ];
+    pub const ALL: [Direction; 4] = [Direction::North, Direction::East, Direction::South, Direction::West];
 
     pub fn from_action(action: Action) -> Self {
         Self::ALL[(action.discrete() % 4) as usize]
@@ -77,19 +72,18 @@ pub struct GridWorld {
 impl GridWorld {
     pub fn compile(def: &LevelDef) -> Result<Self, LevelErrors> {
         let grid = CompiledGrid::compile(def)?;
-        let mut world = Self {
-            agents: Vec::new(),
-            steps: 0,
-            rng: Rng::new(0),
-            last_events: Vec::new(),
-            grid,
-        };
+        let mut world = Self { agents: Vec::new(), steps: 0, rng: Rng::new(0), last_events: Vec::new(), grid };
         world.reset(0);
         Ok(world)
     }
 
     pub fn grid(&self) -> &CompiledGrid {
         &self.grid
+    }
+
+    /// Changes one reward weight for this world (the player's reward editor).
+    pub fn set_reward_weight(&mut self, term: RewardTerm, weight: f32) {
+        self.grid.set_weight(term, weight);
     }
 
     pub fn position(&self, agent: AgentId) -> (i32, i32) {
@@ -130,10 +124,7 @@ impl GridWorld {
                 }
             }
         }
-        Observation {
-            features,
-            state_index,
-        }
+        Observation { features, state_index }
     }
 
     fn observe_all(&self) -> Vec<Observation> {
@@ -150,22 +141,13 @@ impl World for GridWorld {
             .grid
             .spawns
             .iter()
-            .map(|&position| AgentState {
-                position,
-                facing: Direction::East,
-                terminated: false,
-                truncated: false,
-            })
+            .map(|&position| AgentState { position, facing: Direction::East, terminated: false, truncated: false })
             .collect();
         self.observe_all()
     }
 
     fn step(&mut self, actions: &JointAction) -> StepResults {
-        assert_eq!(
-            actions.len(),
-            self.agents.len(),
-            "one action per agent is required"
-        );
+        assert_eq!(actions.len(), self.agents.len(), "one action per agent is required");
         let mut events = Vec::new();
         let mut rewards = vec![0.0f32; self.agents.len()];
 
@@ -182,11 +164,7 @@ impl World for GridWorld {
                 self.agents[id].facing = dir;
                 if self.grid.in_bounds(to) && !self.grid.is_wall(to) {
                     self.agents[id].position = to;
-                    events.push(StepEvent::Moved {
-                        agent: id,
-                        from,
-                        to,
-                    });
+                    events.push(StepEvent::Moved { agent: id, from, to });
                 } else {
                     events.push(StepEvent::BumpedWall { agent: id, at: to });
                 }
@@ -195,21 +173,29 @@ impl World for GridWorld {
                     let value = self.grid.weight(term);
                     if value != 0.0 {
                         rewards[id] += value;
-                        events.push(StepEvent::Reward {
-                            agent: id,
-                            term: term.name().into(),
-                            value,
-                        });
+                        events.push(StepEvent::Reward { agent: id, term: term.name().into(), value });
                     }
                 };
                 pay(RewardTerm::Step, &mut events);
 
                 let here = self.agents[id].position;
+                let cell = self.grid.index(here);
+                if self.grid.lethal[cell] {
+                    events.push(StepEvent::Died { agent: id, at: here });
+                    pay(RewardTerm::Death, &mut events);
+                    self.agents[id].terminated = true;
+                    continue;
+                }
+                if self.grid.hazards[cell] {
+                    events.push(StepEvent::OnHazard { agent: id, at: here });
+                    pay(RewardTerm::Hazard, &mut events);
+                }
+                if self.grid.lures[cell] {
+                    events.push(StepEvent::OnLure { agent: id, at: here });
+                    pay(RewardTerm::Lure, &mut events);
+                }
                 if let Some(term) = self.grid.goals[self.grid.index(here)] {
-                    events.push(StepEvent::GoalReached {
-                        agent: id,
-                        at: here,
-                    });
+                    events.push(StepEvent::GoalReached { agent: id, at: here });
                     pay(term, &mut events);
                     if self.grid.terminate_on_goal {
                         self.agents[id].terminated = true;
@@ -270,6 +256,9 @@ impl World for GridWorld {
             height: g.height as f32,
             walls: cells(&|i| g.walls[i]),
             goals: cells(&|i| g.goals[i].is_some()),
+            hazards: cells(&|i| g.hazards[i]),
+            lethal: cells(&|i| g.lethal[i]),
+            lures: cells(&|i| g.lures[i]),
             agents: self
                 .agents
                 .iter()
@@ -286,14 +275,9 @@ impl World for GridWorld {
                 .iter()
                 .filter_map(|e| match e {
                     StepEvent::Reward { agent, term, value } if term != RewardTerm::Step.name() => {
-                        Some(RenderEvent::Reward {
-                            position: centre(self.agents[*agent].position),
-                            value: *value,
-                        })
+                        Some(RenderEvent::Reward { position: centre(self.agents[*agent].position), value: *value })
                     }
-                    StepEvent::BumpedWall { at, .. } => Some(RenderEvent::Bump {
-                        position: centre(*at),
-                    }),
+                    StepEvent::BumpedWall { at, .. } => Some(RenderEvent::Bump { position: centre(*at) }),
                     _ => None,
                 })
                 .collect(),

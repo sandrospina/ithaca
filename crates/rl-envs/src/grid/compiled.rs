@@ -4,9 +4,7 @@
 use rl_core::{ActionSpace, AgentSpec, FeatureSpec, Glyph, ObservationSpec, WorldSpec};
 
 use crate::catalogue::RewardTerm;
-use crate::level::{
-    BudgetDef, ChallengeDef, Encoding, EngineDef, FeatureDef, LevelDef, Pilot, TerminationDef,
-};
+use crate::level::{BudgetDef, ChallengeDef, Encoding, EngineDef, FeatureDef, LevelDef, Pilot, TerminationDef};
 use crate::validate::{CellMeaning, LevelErrors, resolve_char, validate};
 
 #[derive(Clone, Debug)]
@@ -19,6 +17,17 @@ pub struct CompiledGrid {
     pub walls: Vec<bool>,
     /// Row-major goal reward term per cell, if the cell is a goal.
     pub goals: Vec<Option<RewardTerm>>,
+    /// Row-major: cells that pay the hazard term each step.
+    pub hazards: Vec<bool>,
+    /// Row-major: cells that end the episode.
+    pub lethal: Vec<bool>,
+    /// Row-major: cells that pay the lure term each step.
+    pub lures: Vec<bool>,
+    /// Editor label per reward term, from the level or the catalogue.
+    pub reward_labels: [String; RewardTerm::COUNT],
+    /// Reward terms present in the level file, in file order.
+    pub reward_terms: Vec<RewardTerm>,
+    pub player_editable: crate::level::PlayerEditable,
     pub spawns: Vec<(i32, i32)>,
     pub agent_names: Vec<String>,
     pub agent_glyphs: Vec<Glyph>,
@@ -37,6 +46,13 @@ impl CompiledGrid {
     pub fn compile(def: &LevelDef) -> Result<Self, LevelErrors> {
         validate(def)?;
         let compiled = Self::build(def);
+        let has_specials = compiled.hazards.iter().chain(&compiled.lures).chain(&compiled.lethal).any(|&b| b);
+        if compiled.needs_best_return() && has_specials {
+            return Err(LevelErrors(vec![crate::validate::LevelError::new(
+                "challenge",
+                "shortest-route measures are only defined for maps without hazards or lures",
+            )]));
+        }
         if compiled.needs_best_return() && compiled.best_return(0).is_none() {
             return Err(LevelErrors(vec![crate::validate::LevelError::new(
                 "challenge",
@@ -52,19 +68,10 @@ impl CompiledGrid {
         match self.challenge.as_ref().map(|c| &c.goal) {
             Some(GoalDef::BestReturn) => true,
             Some(GoalDef::Tasks(tasks)) => tasks.iter().any(|t| match t {
-                TaskDef::TrainAgent {
-                    success: SuccessDef::ShortestRoute,
-                    ..
-                } => true,
-                TaskDef::Quiz { questions } => questions.iter().any(|q| {
-                    matches!(
-                        q,
-                        QuestionDef::StatBand {
-                            stat: BatchStat::ShortestRoute,
-                            ..
-                        }
-                    )
-                }),
+                TaskDef::TrainAgent { success: SuccessDef::ShortestRoute, .. } => true,
+                TaskDef::Quiz { questions } => {
+                    questions.iter().any(|q| matches!(q, QuestionDef::StatBand { stat: BatchStat::ShortestRoute, .. }))
+                }
                 _ => false,
             }),
             _ => false,
@@ -78,6 +85,9 @@ impl CompiledGrid {
 
         let mut walls = vec![false; cells];
         let mut goals = vec![None; cells];
+        let mut hazards = vec![false; cells];
+        let mut lethal = vec![false; cells];
+        let mut lures = vec![false; cells];
         let mut spawns = vec![(0, 0); def.agents.len()];
         for (y, row) in def.map.iter().enumerate() {
             for (x, c) in row.chars().enumerate() {
@@ -85,6 +95,9 @@ impl CompiledGrid {
                 match resolve_char(def, c).expect("validated") {
                     CellMeaning::Wall => walls[i] = true,
                     CellMeaning::Goal(term) => goals[i] = RewardTerm::from_name(term),
+                    CellMeaning::Hazard { lethal: true } => lethal[i] = true,
+                    CellMeaning::Hazard { lethal: false } => hazards[i] = true,
+                    CellMeaning::Lure => lures[i] = true,
                     CellMeaning::Spawn(agent) => {
                         let id = def.agents.get_index_of(agent).expect("validated");
                         spawns[id] = (x as i32, y as i32);
@@ -99,13 +112,8 @@ impl CompiledGrid {
             reward_weights[RewardTerm::from_name(name).expect("validated").index()] = *weight;
         }
 
-        let observation = ObservationSpec {
-            features: def
-                .observation
-                .iter()
-                .map(|f| feature_spec(f, width, height))
-                .collect(),
-        };
+        let observation =
+            ObservationSpec { features: def.observation.iter().map(|f| feature_spec(f, width, height)).collect() };
         let spec = WorldSpec {
             agents: def
                 .agents
@@ -115,9 +123,7 @@ impl CompiledGrid {
                     observation: observation.clone(),
                     action: ActionSpace::Discrete {
                         n: 4,
-                        labels: ["north", "east", "south", "west"]
-                            .map(String::from)
-                            .to_vec(),
+                        labels: ["north", "east", "south", "west"].map(String::from).to_vec(),
                     },
                 })
                 .collect(),
@@ -130,6 +136,13 @@ impl CompiledGrid {
             height: h,
             walls,
             goals,
+            hazards,
+            lethal,
+            lures,
+            reward_labels: RewardTerm::ALL
+                .map(|t| def.reward_labels.get(t.name()).cloned().unwrap_or_else(|| t.description().to_string())),
+            reward_terms: def.reward.keys().filter_map(|n| RewardTerm::from_name(n)).collect(),
+            player_editable: def.player_editable.clone(),
             spawns,
             agent_names: def.agents.keys().cloned().collect(),
             agent_glyphs: def.agents.values().map(|a| a.glyph).collect(),
@@ -160,6 +173,12 @@ impl CompiledGrid {
         self.reward_weights[term.index()]
     }
 
+    /// Changes one reward weight, e.g. from the player's reward editor.
+    /// Callers enforce the level's editing bounds.
+    pub fn set_weight(&mut self, term: RewardTerm, weight: f32) {
+        self.reward_weights[term.index()] = weight;
+    }
+
     /// Fewest moves from `agent`'s spawn to any goal cell, by breadth-first
     /// search, together with that goal's reward term. `None` if no goal is
     /// reachable.
@@ -177,8 +196,7 @@ impl CompiledGrid {
             }
             for (dx, dy) in [(0, -1), (1, 0), (0, 1), (-1, 0)] {
                 let next = (cell.0 + dx, cell.1 + dy);
-                if self.in_bounds(next) && !self.is_wall(next) && dist[self.index(next)] == u32::MAX
-                {
+                if self.in_bounds(next) && !self.is_wall(next) && dist[self.index(next)] == u32::MAX {
                     dist[self.index(next)] = d + 1;
                     queue.push_back(next);
                 }
@@ -192,12 +210,7 @@ impl CompiledGrid {
     /// enforces for `BestReturn` challenges.
     pub fn best_return(&self, agent: usize) -> Option<(f32, u32)> {
         let (moves, term) = self.shortest_path_to_goal(agent)?;
-        (moves <= self.max_steps).then(|| {
-            (
-                moves as f32 * self.weight(RewardTerm::Step) + self.weight(term),
-                moves,
-            )
-        })
+        (moves <= self.max_steps).then(|| (moves as f32 * self.weight(RewardTerm::Step) + self.weight(term), moves))
     }
 }
 
@@ -205,21 +218,15 @@ fn feature_spec(f: &FeatureDef, width: u32, height: u32) -> FeatureSpec {
     let cells = width * height;
     match f {
         FeatureDef::SelfPosition { encoding } => match encoding {
-            Encoding::Index => FeatureSpec {
-                name: "self_position(encoding: index)".into(),
-                size: 1,
-                cardinality: Some(cells),
-            },
-            Encoding::Normalised => FeatureSpec {
-                name: "self_position(encoding: normalised)".into(),
-                size: 2,
-                cardinality: None,
-            },
-            Encoding::OneHot => FeatureSpec {
-                name: "self_position(encoding: one_hot)".into(),
-                size: cells,
-                cardinality: Some(cells),
-            },
+            Encoding::Index => {
+                FeatureSpec { name: "self_position(encoding: index)".into(), size: 1, cardinality: Some(cells) }
+            }
+            Encoding::Normalised => {
+                FeatureSpec { name: "self_position(encoding: normalised)".into(), size: 2, cardinality: None }
+            }
+            Encoding::OneHot => {
+                FeatureSpec { name: "self_position(encoding: one_hot)".into(), size: cells, cardinality: Some(cells) }
+            }
         },
     }
 }

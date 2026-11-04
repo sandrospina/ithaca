@@ -16,12 +16,7 @@ fn level_files() -> Vec<(String, String)> {
         .expect("content/levels exists")
         .map(|e| e.unwrap().path())
         .filter(|p| p.extension().is_some_and(|e| e == "ron"))
-        .map(|p| {
-            (
-                p.file_name().unwrap().to_string_lossy().into_owned(),
-                std::fs::read_to_string(&p).unwrap(),
-            )
-        })
+        .map(|p| (p.file_name().unwrap().to_string_lossy().into_owned(), std::fs::read_to_string(&p).unwrap()))
         .collect();
     files.sort();
     assert!(!files.is_empty(), "no level files found");
@@ -32,11 +27,7 @@ fn level_files() -> Vec<(String, String)> {
 fn every_level_file_compiles() {
     for (name, source) in level_files() {
         let def = LevelDef::parse(&source).unwrap_or_else(|e| panic!("{name}: {e}"));
-        assert_eq!(
-            format!("{}.ron", def.id),
-            name,
-            "level id must match file name"
-        );
+        assert_eq!(format!("{}.ron", def.id), name, "level id must match file name");
         load_world(&source).unwrap_or_else(|e| panic!("{name}: {e}"));
     }
 }
@@ -49,25 +40,14 @@ fn random_play_keeps_invariants_on_every_level() {
         for episode in 0..200u64 {
             world.reset(episode);
             loop {
-                let actions = (0..world.spec().agents.len())
-                    .map(|_| Action::Discrete(rng.below(4)))
-                    .collect();
+                let actions = (0..world.spec().agents.len()).map(|_| Action::Discrete(rng.below(4))).collect();
                 let r = world.step(&actions);
                 for a in 0..world.spec().agents.len() {
                     let p = world.position(a);
-                    assert!(
-                        world.grid().in_bounds(p),
-                        "{name}: agent left the map at {p:?}"
-                    );
-                    assert!(
-                        !world.grid().is_wall(p),
-                        "{name}: agent inside a wall at {p:?}"
-                    );
+                    assert!(world.grid().in_bounds(p), "{name}: agent left the map at {p:?}");
+                    assert!(!world.grid().is_wall(p), "{name}: agent inside a wall at {p:?}");
                 }
-                assert!(
-                    world.step_count() <= world.grid().max_steps,
-                    "{name}: exceeded max_steps"
-                );
+                assert!(world.step_count() <= world.grid().max_steps, "{name}: exceeded max_steps");
                 if r.done() {
                     break;
                 }

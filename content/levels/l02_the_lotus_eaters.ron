@@ -1,0 +1,104 @@
+// Level 2 — The Lotus-Eaters. Reward engineering.
+// The player edits the reward and discovers that the agent maximises exactly
+// what the reward says, not what the designer meant. See docs/campaign.md.
+//
+// Routes from S to G:
+//   rocky shortcut: along the top, down through the rocks at the far right (13 moves, 1 rock)
+//   safe detour:    down the left channel and round the inner wall (17 moves, no rocks)
+// The lotus field sits beside the start; whirlpools wait one move away.
+Level(
+  schema: 1,
+  id: "l02_the_lotus_eaters",
+  title: "The Lotus-Eaters",
+  engine: Grid(width: 8, height: 7, moves: Four),
+  map: [
+    "S.LL....",
+    "W.LL....",
+    "W.......",
+    "#.#####r",
+    "#.#.....",
+    "#.#.###.",
+    "W...#..G",
+  ],
+  legend: {
+    'S': Spawn(agent: "odysseus"),
+    'G': Goal(term: "goal_reached"),
+    'L': Lure,
+    'r': Hazard(lethal: false),
+    'W': Hazard(lethal: true),
+  },
+  agents: {
+    "odysseus": (controller: Learner, glyph: agent),
+  },
+  reward: { "goal_reached": 100.0, "step": -1.0, "hazard": -2.0, "death": -100.0, "lure": 0.5 },
+  reward_labels: {
+    "goal_reached": "reaching the shore",
+    "step": "each move",
+    "hazard": "each move on the rocks",
+    "death": "a whirlpool",
+    "lure": "each move in the lotus field",
+  },
+  observation: [ self_position(encoding: Index) ],
+  termination: [ GoalReached, Death ],
+  truncation: (max_steps: 60),
+  pilot: Agent,
+  player_editable: (
+    reward: (terms: ["goal_reached", "step", "hazard", "death", "lure"], range: (-100.0, 100.0)),
+    hyperparameters: (alpha: (0.01, 1.0), gamma: (0.0, 0.999), epsilon: (0.0, 1.0)),
+  ),
+  challenge: (
+    objective: "The raft does exactly what the reward says. Make it fail on purpose, twice. Then bring it home safely.",
+    goal: Tasks([
+      TrainAgent(
+        threshold: 0.9, eval_episodes: 10, eval_seeds: Fixed(2000), success: ReachGoal,
+        label: "train a raft that reaches the shore",
+      ),
+      TrainAgent(
+        threshold: 0.9, eval_episodes: 10, eval_seeds: Fixed(2000), success: StuckOnLure,
+        label: "breed a lotus-eater: a raft that never leaves the lotus",
+      ),
+      TrainAgent(
+        threshold: 0.9, eval_episodes: 10, eval_seeds: Fixed(2000), success: Dies,
+        label: "breed a raft that gives up and dives into a whirlpool",
+      ),
+      TrainAgent(
+        threshold: 0.9, eval_episodes: 10, eval_seeds: Fixed(2000), success: SafeArrival,
+        label: "bring the raft home without touching the rocks",
+      ),
+      Quiz(questions: [
+        Choice(
+          prompt: "Your lotus-eater collected a high return while never reaching home. Whose mistake was that?",
+          options: [
+            "The agent's: it failed to learn.",
+            "The reward designer's: the reward said staying was worth more than going home.",
+            "Nobody's: the lotus field is a bug in the map.",
+          ],
+          answer: 1,
+          explain: "The agent learned perfectly. It maximised the reward it was given. Reward hacking is a design error, not a learning error.",
+        ),
+        Choice(
+          prompt: "Why did one of your rafts dive straight into a whirlpool?",
+          options: [
+            "Whirlpools attract rafts.",
+            "Ending the voyage at once cost less than all the moves needed to reach the shore.",
+            "It was exploring and got unlucky.",
+          ],
+          answer: 1,
+          explain: "When every move is expensive and dying is cheap, the best-scoring plan is to stop as soon as possible.",
+        ),
+        Choice(
+          prompt: "With the default rewards the raft crosses the rocks. What changes its mind?",
+          options: [
+            "Training for more episodes.",
+            "Making each move on the rocks cost more than the extra moves of the safe detour.",
+            "Lowering the reward for reaching the shore.",
+          ],
+          answer: 1,
+          explain: "The detour is four moves longer, and reaching home later is also worth less after discounting. The rocks must cost more than both together.",
+        ),
+      ]),
+    ]),
+  ),
+  budget: (episodes: 1500, stars: [1500, 800, 400]),
+  tutorial: "l02_the_lotus_eaters",
+)

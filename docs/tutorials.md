@@ -69,7 +69,7 @@ A reference section opened from the shell at any time.
 | # | Level | Concept taught | Key "aha" experiment | Further reading |
 |---|---|---|---|---|
 | 0 | Calypso's Loom | Agent, environment, state, action, reward, episode, return | The player is the agent. The HUD labels every piece of the loop as they sail | Sutton & Barto ch. 1, 3 |
-| 1 | The Raft | Value of an action, Q-table, TD update, ε-greedy, α, γ | γ = 0.1 vs 0.95. ε = 0 gets stuck, ε = 0.2 finds the shore | S&B ch. 6.5 |
+| 1 | The Raft | Value of an action, Q-table, TD update, ε-greedy, α, γ | γ = 0.1 vs 0.95: at γ = 0.1 every move far from the shore is worth about −1.11, so the raft wanders before it finds the way (6 of 10 shortest routes against 10 of 10). ε = 0 is not shown: with a step penalty and a zero-initialised table, untried moves look best, so the greedy raft explores anyway | S&B ch. 6.5 |
 | 2 | The Lotus-Eaters | Reward design, reward hacking, shaping | A small lotus reward makes the agent never leave. Removing the step penalty makes it wander | S&B ch. 3.2; Ng et al. 1999 (shaping) |
 | 3 | The Cyclops' Cave | State vs observation, the Markov property | Same algorithm, with and without the Cyclops in the observation | S&B ch. 3.1, 17.3 |
 | 4 | The Bag of Winds | Stochastic transitions, expected return, MDPs | Repeat one action from one cell 100 times and plot outcomes. The safe path beats the short path | S&B ch. 3.1 |
@@ -90,6 +90,7 @@ A reference section opened from the shell at any time.
 
 - Each tutorial is a data file (Markdown for text + a RON/JSON step script) under `content/tutorials/<level>/`.
 - Steps can: show text at a depth, highlight a UI element, load a seeded scenario, set hyperparameters, run training for N episodes, ask a prediction or quiz question, and unlock a library entry.
+- Implemented so far: `Say` (text and highlights), `Predict` (the player picks an answer, then runs the experiment that settles it) and `Experiment` (a guided run with pinned settings). Each experiment lists `expect` bounds on its test-seed results, and `every_guided_experiment_shows_its_lesson` in `crates/rl-web/src/sim.rs` runs them all.
 - No arbitrary code. The step vocabulary is a fixed enum, so tutorials stay safe and testable.
 - Writing tutorial text does not require recompiling the game. Translation can be added later.
 

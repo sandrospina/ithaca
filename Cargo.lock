@@ -1355,6 +1355,7 @@ name = "rl-agents"
 version = "0.1.0"
 dependencies = [
  "rl-core",
+ "serde",
 ]
 
 [[package]]
@@ -1421,6 +1422,7 @@ dependencies = [
  "serde",
  "serde_json",
  "wasm-bindgen",
+ "wasm-bindgen-futures",
  "web-sys",
 ]
 

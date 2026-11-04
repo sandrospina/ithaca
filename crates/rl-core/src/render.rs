@@ -15,6 +15,8 @@ pub enum Glyph {
     Terrain,
     Hazard,
     Policy,
+    /// A tempting reward that is not the goal (e.g. the lotus field).
+    Lure,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -46,6 +48,15 @@ pub struct RenderModel {
     /// Grid cells that are walls, if the world is a grid.
     pub walls: Vec<(i32, i32)>,
     pub goals: Vec<(i32, i32)>,
+    /// Cells that cost reward while the agent is on them.
+    #[serde(default)]
+    pub hazards: Vec<(i32, i32)>,
+    /// Cells that end the episode.
+    #[serde(default)]
+    pub lethal: Vec<(i32, i32)>,
+    /// Cells that pay reward while the agent is on them.
+    #[serde(default)]
+    pub lures: Vec<(i32, i32)>,
     pub agents: Vec<RenderAgent>,
     pub events: Vec<RenderEvent>,
 }

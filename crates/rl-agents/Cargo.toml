@@ -8,3 +8,4 @@ publish.workspace = true
 
 [dependencies]
 rl-core.workspace = true
+serde.workspace = true

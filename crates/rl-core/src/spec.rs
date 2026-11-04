@@ -43,9 +43,7 @@ impl ObservationSpec {
     /// Number of discrete states, if every feature is discrete. This is the
     /// Q-table row count shown to the player.
     pub fn state_count(&self) -> Option<u64> {
-        self.features.iter().try_fold(1u64, |acc, f| {
-            f.cardinality.map(|c| acc.saturating_mul(u64::from(c)))
-        })
+        self.features.iter().try_fold(1u64, |acc, f| f.cardinality.map(|c| acc.saturating_mul(u64::from(c))))
     }
 }
 
@@ -112,19 +110,12 @@ mod tests {
         AgentSpec {
             name: "odysseus".into(),
             observation: ObservationSpec { features },
-            action: ActionSpace::Discrete {
-                n: 4,
-                labels: vec![],
-            },
+            action: ActionSpace::Discrete { n: 4, labels: vec![] },
         }
     }
 
     fn pos() -> FeatureSpec {
-        FeatureSpec {
-            name: "self_position(encoding: index)".into(),
-            size: 1,
-            cardinality: Some(25),
-        }
+        FeatureSpec { name: "self_position(encoding: index)".into(), size: 1, cardinality: Some(25) }
     }
 
     #[test]

@@ -21,6 +21,12 @@ pub const LEVELS: &[LevelEntry] = &[
         level_source: include_str!("../../../content/levels/l01_the_raft.ron"),
         tutorial_source: include_str!("../../../content/tutorials/l01_the_raft.ron"),
     },
+    LevelEntry {
+        id: "l02_the_lotus_eaters",
+        menu_label: "2 · The Lotus-Eaters",
+        level_source: include_str!("../../../content/levels/l02_the_lotus_eaters.ron"),
+        tutorial_source: include_str!("../../../content/tutorials/l02_the_lotus_eaters.ron"),
+    },
 ];
 
 pub fn level(id: &str) -> Option<&'static LevelEntry> {

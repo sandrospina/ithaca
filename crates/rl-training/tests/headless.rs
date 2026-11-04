@@ -13,12 +13,7 @@ fn thousands_of_headless_steps() {
     let mut steps = 0;
     let mut episodes = 0;
     while steps < 50_000 {
-        let r = run_episode(
-            &mut world,
-            &mut [&mut agent as &mut dyn PolicyProvider],
-            episodes,
-            episodes,
-        );
+        let r = run_episode(&mut world, &mut [&mut agent as &mut dyn PolicyProvider], episodes, episodes);
         steps += r.length;
         episodes += 1;
     }
@@ -33,10 +28,7 @@ fn same_seeds_give_identical_episodes() {
     let r2 = run_episode(&mut world, &mut [&mut a as &mut dyn PolicyProvider], 5, 9);
     assert_eq!(r1, r2);
     let r3 = run_episode(&mut world, &mut [&mut a as &mut dyn PolicyProvider], 5, 10);
-    assert_ne!(
-        r1.actions, r3.actions,
-        "a different policy seed should change random play"
-    );
+    assert_ne!(r1.actions, r3.actions, "a different policy seed should change random play");
 }
 
 #[test]
@@ -57,12 +49,7 @@ fn random_agent_is_a_weak_baseline() {
     // The "old way fails" beat of Level 1 relies on random play being poor.
     let mut world = rl_envs::load_world(RAFT).unwrap();
     let mut a = RandomAgent;
-    let s = evaluate(
-        &mut world,
-        &mut [&mut a as &mut dyn PolicyProvider],
-        1000,
-        200,
-    );
+    let s = evaluate(&mut world, &mut [&mut a as &mut dyn PolicyProvider], 1000, 200);
     assert!(s.mean_length > 20.0, "random play should wander: {s:?}");
     assert!(s.mean_return < 0.0, "{s:?}");
 }

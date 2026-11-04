@@ -30,15 +30,8 @@ impl ActionMask {
     /// A mask where all `len` actions are valid.
     pub fn all(len: u32) -> Self {
         assert!((1..=64).contains(&len), "action count must be 1..=64");
-        let bits = if len == 64 {
-            u64::MAX
-        } else {
-            (1u64 << len) - 1
-        };
-        Self {
-            bits,
-            len: len as u8,
-        }
+        let bits = if len == 64 { u64::MAX } else { (1u64 << len) - 1 };
+        Self { bits, len: len as u8 }
     }
 
     pub fn len(&self) -> u32 {

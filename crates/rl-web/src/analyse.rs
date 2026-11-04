@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use leptos::prelude::*;
 use rl_envs::{GoalDef, QuestionDef, TaskDef};
-use rl_training::BatchReport;
+use rl_training::{BatchEpisode, BatchReport};
 use rl_tutorial::UiElement;
 use wasm_bindgen::JsCast;
 
@@ -48,14 +48,14 @@ pub struct AnalyseCtx {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-struct Hover {
+pub struct Hover {
     /// Position in percent of the chart box.
     x: f64,
     y: f64,
     text: String,
 }
 
-fn tooltip(hover: RwSignal<Option<Hover>>) -> impl IntoView {
+pub fn tooltip(hover: RwSignal<Option<Hover>>) -> impl IntoView {
     move || {
         hover.get().map(|h| {
             view! {
@@ -82,24 +82,49 @@ fn y_axis(lo: f64, hi: f64, y: impl Fn(f64) -> f64) -> impl IntoView {
 
 /// Scatter of every voyage's return, with the running mean and the best possible return.
 fn returns_chart(r: &BatchReport, hover: RwSignal<Option<Hover>>) -> impl IntoView {
-    let n = r.episodes.len();
-    let best_possible = r.best_possible.map(f64::from);
-    let mut lo = f64::from(r.returns.min);
-    let mut hi = f64::from(r.returns.max);
+    episode_chart(
+        EpisodeChart {
+            episodes: &r.episodes,
+            trend: r.running_mean(),
+            trend_label: "running mean",
+            unit: "voyage",
+            best_possible: r.best_possible,
+            mark_best: Some(r.best),
+            aria: "Return of every voyage in the batch, with the running mean",
+        },
+        hover,
+    )
+}
+
+/// What an episode chart shows.
+pub struct EpisodeChart<'a> {
+    pub episodes: &'a [BatchEpisode],
+    /// One trend value per episode, drawn as a line.
+    pub trend: Vec<f32>,
+    pub trend_label: &'static str,
+    /// What one episode is called on the x axis and in tooltips.
+    pub unit: &'static str,
+    pub best_possible: Option<f32>,
+    /// Index of an episode to ring and label as the best.
+    pub mark_best: Option<usize>,
+    pub aria: &'static str,
+}
+
+/// Scatter of every episode's return with a trend line: used for batch
+/// voyages and for training learning curves.
+pub fn episode_chart(c: EpisodeChart<'_>, hover: RwSignal<Option<Hover>>) -> impl IntoView {
+    let n = c.episodes.len().max(1);
+    let best_possible = c.best_possible.map(f64::from);
+    let returns = c.episodes.iter().map(|e| f64::from(e.episode_return));
+    let mut lo = returns.clone().fold(f64::INFINITY, f64::min).min(0.0);
+    let mut hi = returns.fold(f64::NEG_INFINITY, f64::max).max(0.0);
     if let Some(b) = best_possible {
         lo = lo.min(b);
         hi = hi.max(b);
     }
     let pad = ((hi - lo) * 0.06).max(1.0);
     let (lo, hi) = (lo - pad, hi + pad);
-    let x = move |i: usize| {
-        PAD_L
-            + if n > 1 {
-                i as f64 / (n - 1) as f64 * PLOT_W
-            } else {
-                PLOT_W / 2.0
-            }
-    };
+    let x = move |i: usize| PAD_L + if n > 1 { i as f64 / (n - 1) as f64 * PLOT_W } else { PLOT_W / 2.0 };
     let y = move |v: f64| PAD_T + (hi - v) / (hi - lo) * PLOT_H;
     let radius = if n > 2_000 {
         1.3
@@ -109,15 +134,13 @@ fn returns_chart(r: &BatchReport, hover: RwSignal<Option<Hover>>) -> impl IntoVi
         3.0
     };
 
-    let dots = r
+    let dots = c
         .episodes
         .iter()
         .enumerate()
-        .map(
-            |(i, e)| view! { <circle cx=x(i) cy=y(f64::from(e.episode_return)) r=radius></circle> },
-        )
+        .map(|(i, e)| view! { <circle cx=x(i) cy=y(f64::from(e.episode_return)) r=radius></circle> })
         .collect_view();
-    let mean = r.running_mean();
+    let mean = c.trend;
     let mean_points = mean
         .iter()
         .enumerate()
@@ -125,46 +148,40 @@ fn returns_chart(r: &BatchReport, hover: RwSignal<Option<Hover>>) -> impl IntoVi
         .collect::<Vec<_>>()
         .join(" ");
     let final_mean = f64::from(*mean.last().unwrap_or(&0.0));
-    let best = *r.best_episode();
-    let (bx, by) = (x(r.best), y(f64::from(best.episode_return)));
+    let best = c.mark_best.and_then(|i| c.episodes.get(i).map(|e| (i, *e)));
 
     let x_ticks: Vec<usize> = {
         let step = nice_step(n as f64, 4).max(1.0) as usize;
         (0..n).step_by(step).chain(std::iter::once(n - 1)).collect()
     };
-    let episodes = r.episodes.clone();
+    let episodes = c.episodes.to_vec();
+    let unit = c.unit;
     let on_move = move |ev: web_sys::MouseEvent| {
-        let Some(target) = ev
-            .current_target()
-            .and_then(|t| t.dyn_into::<web_sys::Element>().ok())
-        else {
+        let Some(target) = ev.current_target().and_then(|t| t.dyn_into::<web_sys::Element>().ok()) else {
             return;
         };
         let rect = target.get_bounding_client_rect();
         let frac = ((f64::from(ev.client_x()) - rect.left()) / rect.width()).clamp(0.0, 1.0);
-        let i = (frac * (episodes.len() - 1) as f64).round() as usize;
+        let Some(last) = episodes.len().checked_sub(1) else { return };
+        let i = (frac * last as f64).round() as usize;
         let e = episodes[i];
         hover.set(Some(Hover {
             x: x(i) / W * 100.0,
             y: y(f64::from(e.episode_return)) / H * 100.0,
             text: format!(
-                "voyage {} · seed {} · return {} · {} moves{}",
+                "{unit} {} · seed {} · return {} · {} moves{}",
                 i + 1,
                 e.seed,
                 signed(f64::from(e.episode_return)),
                 e.length,
-                if e.reached_goal {
-                    ""
-                } else {
-                    " · out of time"
-                }
+                if e.reached_goal { "" } else { " · did not reach the shore" }
             ),
         }));
     };
 
     view! {
         <div class="chart-wrap">
-            <svg class="chart" viewBox=format!("0 0 {W} {H}") role="img" aria-label="Return of every voyage in the batch, with the running mean">
+            <svg class="chart" viewBox=format!("0 0 {W} {H}") role="img" aria-label=c.aria>
                 {y_axis(lo, hi, y)}
                 {x_ticks
                     .into_iter()
@@ -180,10 +197,16 @@ fn returns_chart(r: &BatchReport, hover: RwSignal<Option<Hover>>) -> impl IntoVi
                 <g class="series dots">{dots}</g>
                 <polyline class="series mean" points=mean_points></polyline>
                 <text class="label mean-label" x=PAD_L + PLOT_W + 6.0 y=y(final_mean) + 4.0>
-                    {format!("running mean {}", signed(final_mean))}
+                    {format!("{} {}", c.trend_label, signed(final_mean))}
                 </text>
-                <circle class="best-ring" cx=bx cy=by r=radius + 4.0></circle>
-                <text class="label" x=bx y=by - radius - 8.0 text-anchor="middle">{format!("best · seed {}", best.seed)}</text>
+                {best
+                    .map(|(i, e)| {
+                        let (bx, by) = (x(i), y(f64::from(e.episode_return)));
+                        view! {
+                            <circle class="best-ring" cx=bx cy=by r=radius + 4.0></circle>
+                            <text class="label" x=bx y=by - radius - 8.0 text-anchor="middle">{format!("best · seed {}", e.seed)}</text>
+                        }
+                    })}
                 {move || {
                     hover
                         .get()
@@ -206,10 +229,10 @@ fn returns_chart(r: &BatchReport, hover: RwSignal<Option<Hover>>) -> impl IntoVi
         </div>
         <div class="legend">
             <span class="key dot-key"></span>
-            "return of one voyage"
+            {format!("return of one {unit}")}
             <span class="key line-key"></span>
-            "running mean"
-            <span class="subtitle">"· x axis: voyage number"</span>
+            {c.trend_label}
+            <span class="subtitle">{format!("· x axis: {unit} number")}</span>
         </div>
     }
 }
@@ -305,11 +328,7 @@ fn histogram_chart(r: &BatchReport, hover: RwSignal<Option<Hover>>) -> impl Into
 fn stat_table(r: &BatchReport) -> impl IntoView {
     let row = |name: &'static str, s: rl_training::Summary, sign: bool| {
         let f = move |v: f32| {
-            if sign {
-                signed(f64::from(v))
-            } else {
-                format!("{v:.1}")
-            }
+            if sign { signed(f64::from(v)) } else { format!("{v:.1}") }
         };
         view! {
             <tr>
@@ -374,12 +393,7 @@ fn tiles(r: &BatchReport, ctx: AnalyseCtx) -> impl IntoView {
     }
 }
 
-fn quiz(
-    ctx: AnalyseCtx,
-    level_id: String,
-    task: usize,
-    questions: Arc<Vec<QuestionDef>>,
-) -> impl IntoView {
+fn quiz(ctx: AnalyseCtx, level_id: String, task: usize, questions: Arc<Vec<QuestionDef>>) -> impl IntoView {
     questions
         .iter()
         .enumerate()
@@ -468,9 +482,7 @@ pub fn analyse_view(ctx: AnalyseCtx) -> impl IntoView {
                 return None;
             };
             tasks.iter().enumerate().find_map(|(i, t)| match t {
-                TaskDef::Quiz { questions } => {
-                    Some((s.level_id.clone(), i, Arc::new(questions.clone())))
-                }
+                TaskDef::Quiz { questions } => Some((s.level_id.clone(), i, Arc::new(questions.clone()))),
                 _ => None,
             })
         })

@@ -26,10 +26,7 @@ mod tests {
         let mut mask = ActionMask::all(4);
         mask.set(0, false);
         mask.set(2, false);
-        let obs = Observation {
-            features: vec![],
-            state_index: None,
-        };
+        let obs = Observation { features: vec![], state_index: None };
         let mut rng = Rng::new(3);
         let mut agent = RandomAgent;
         for _ in 0..200 {

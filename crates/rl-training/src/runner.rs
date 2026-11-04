@@ -28,21 +28,12 @@ pub fn run_episode<W: World + ?Sized>(
 ) -> EpisodeRecord {
     let n = world.spec().agents.len();
     assert_eq!(policies.len(), n, "one policy per agent is required");
-    let mut rngs: Vec<Rng> = (0..n as u64)
-        .map(|i| Rng::new(policy_seed).fork(i))
-        .collect();
+    let mut rngs: Vec<Rng> = (0..n as u64).map(|i| Rng::new(policy_seed).fork(i)).collect();
     let mut observations = world.reset(seed);
-    let mut record = EpisodeRecord {
-        seed,
-        actions: Vec::new(),
-        returns: vec![0.0; n],
-        length: 0,
-        terminated: false,
-    };
+    let mut record = EpisodeRecord { seed, actions: Vec::new(), returns: vec![0.0; n], length: 0, terminated: false };
     loop {
-        let actions: JointAction = (0..n)
-            .map(|i| policies[i].act(&observations[i], &world.action_mask(i), &mut rngs[i]))
-            .collect();
+        let actions: JointAction =
+            (0..n).map(|i| policies[i].act(&observations[i], &world.action_mask(i), &mut rngs[i])).collect();
         let result = world.step(&actions);
         record.actions.push(actions);
         record.length += 1;

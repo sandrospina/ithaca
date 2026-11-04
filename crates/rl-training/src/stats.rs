@@ -26,11 +26,7 @@ impl Summary {
         sorted.sort_by(f32::total_cmp);
         let n = sorted.len() as f64;
         let mean = sorted.iter().map(|&v| f64::from(v)).sum::<f64>() / n;
-        let var = sorted
-            .iter()
-            .map(|&v| (f64::from(v) - mean).powi(2))
-            .sum::<f64>()
-            / n;
+        let var = sorted.iter().map(|&v| (f64::from(v) - mean).powi(2)).sum::<f64>() / n;
         Some(Self {
             mean: mean as f32,
             std_dev: var.sqrt() as f32,
@@ -81,30 +77,51 @@ pub struct BatchReport {
     pub worst: usize,
 }
 
+/// Mean return of the first `k` episodes, for `k = 1..=n`.
+pub fn running_mean(episodes: &[BatchEpisode]) -> Vec<f32> {
+    let mut sum = 0.0f64;
+    episodes
+        .iter()
+        .enumerate()
+        .map(|(i, e)| {
+            sum += f64::from(e.episode_return);
+            (sum / (i + 1) as f64) as f32
+        })
+        .collect()
+}
+
+/// Mean return over a sliding window of the last `window` episodes: the
+/// usual way to read a learning curve, which a cumulative mean would smooth away.
+pub fn moving_mean(episodes: &[BatchEpisode], window: usize) -> Vec<f32> {
+    let window = window.max(1);
+    let mut sum = 0.0f64;
+    episodes
+        .iter()
+        .enumerate()
+        .map(|(i, e)| {
+            sum += f64::from(e.episode_return);
+            if i >= window {
+                sum -= f64::from(episodes[i - window].episode_return);
+            }
+            (sum / (i + 1).min(window) as f64) as f32
+        })
+        .collect()
+}
+
 /// Tolerance when comparing returns to the best possible return.
 const RETURN_EPSILON: f32 = 1e-4;
 
 impl BatchReport {
     /// Builds a report. Returns `None` for an empty batch.
-    pub fn new(
-        agent: &str,
-        episodes: Vec<BatchEpisode>,
-        best_possible: Option<f32>,
-    ) -> Option<Self> {
+    pub fn new(agent: &str, episodes: Vec<BatchEpisode>, best_possible: Option<f32>) -> Option<Self> {
         let first_seed = episodes.first()?.seed;
         let returns: Vec<f32> = episodes.iter().map(|e| e.episode_return).collect();
         let lengths: Vec<f32> = episodes.iter().map(|e| e.length as f32).collect();
         let n = episodes.len() as f32;
-        let best = (0..episodes.len()).max_by(|&a, &b| {
-            returns[a]
-                .total_cmp(&returns[b])
-                .then(episodes[b].seed.cmp(&episodes[a].seed))
-        })?;
-        let worst = (0..episodes.len()).min_by(|&a, &b| {
-            returns[a]
-                .total_cmp(&returns[b])
-                .then(episodes[a].seed.cmp(&episodes[b].seed))
-        })?;
+        let best = (0..episodes.len())
+            .max_by(|&a, &b| returns[a].total_cmp(&returns[b]).then(episodes[b].seed.cmp(&episodes[a].seed)))?;
+        let worst = (0..episodes.len())
+            .min_by(|&a, &b| returns[a].total_cmp(&returns[b]).then(episodes[a].seed.cmp(&episodes[b].seed)))?;
         Some(Self {
             agent: agent.to_string(),
             first_seed,
@@ -113,10 +130,7 @@ impl BatchReport {
             reached_goal_rate: episodes.iter().filter(|e| e.reached_goal).count() as f32 / n,
             best_possible,
             shortest_route_rate: best_possible.map(|target| {
-                episodes
-                    .iter()
-                    .filter(|e| e.reached_goal && e.episode_return >= target - RETURN_EPSILON)
-                    .count() as f32
+                episodes.iter().filter(|e| e.reached_goal && e.episode_return >= target - RETURN_EPSILON).count() as f32
                     / n
             }),
             best,
@@ -136,15 +150,7 @@ impl BatchReport {
     /// Mean return of the first `k` episodes, for `k = 1..=n`. A flat curve
     /// is what "not learning" looks like.
     pub fn running_mean(&self) -> Vec<f32> {
-        let mut sum = 0.0f64;
-        self.episodes
-            .iter()
-            .enumerate()
-            .map(|(i, e)| {
-                sum += f64::from(e.episode_return);
-                (sum / (i + 1) as f64) as f32
-            })
-            .collect()
+        running_mean(&self.episodes)
     }
 
     /// Histogram of returns with bins of `width`, aligned to multiples of
@@ -159,11 +165,7 @@ impl BatchReport {
             let i = ((e.episode_return / width).floor() - first) as usize;
             counts[i.min(bins - 1)] += 1;
         }
-        counts
-            .into_iter()
-            .enumerate()
-            .map(|(i, c)| ((first + i as f32) * width, c))
-            .collect()
+        counts.into_iter().enumerate().map(|(i, c)| ((first + i as f32) * width, c)).collect()
     }
 }
 
@@ -172,12 +174,7 @@ mod tests {
     use super::*;
 
     fn ep(seed: u64, r: f32, reached: bool) -> BatchEpisode {
-        BatchEpisode {
-            seed,
-            episode_return: r,
-            length: 10,
-            reached_goal: reached,
-        }
+        BatchEpisode { seed, episode_return: r, length: 10, reached_goal: reached }
     }
 
     #[test]
@@ -193,12 +190,7 @@ mod tests {
     fn report_finds_best_worst_and_rates() {
         let r = BatchReport::new(
             "random",
-            vec![
-                ep(10, -5.0, true),
-                ep(11, 2.0, true),
-                ep(12, 2.0, true),
-                ep(13, -100.0, false),
-            ],
+            vec![ep(10, -5.0, true), ep(11, 2.0, true), ep(12, 2.0, true), ep(13, -100.0, false)],
             Some(2.0),
         )
         .unwrap();
@@ -210,13 +202,16 @@ mod tests {
     }
 
     #[test]
+    fn moving_mean_uses_a_sliding_window() {
+        let eps: Vec<_> = [0.0, 2.0, 4.0, 6.0].iter().enumerate().map(|(i, r)| ep(i as u64, *r, true)).collect();
+        assert_eq!(moving_mean(&eps, 2), vec![0.0, 1.0, 3.0, 5.0]);
+        assert_eq!(running_mean(&eps), vec![0.0, 1.0, 2.0, 3.0]);
+    }
+
+    #[test]
     fn histogram_covers_every_episode() {
-        let r = BatchReport::new(
-            "random",
-            vec![ep(0, -12.0, true), ep(1, -3.0, true), ep(2, 2.0, true)],
-            None,
-        )
-        .unwrap();
+        let r =
+            BatchReport::new("random", vec![ep(0, -12.0, true), ep(1, -3.0, true), ep(2, 2.0, true)], None).unwrap();
         let h = r.histogram(10.0);
         assert_eq!(h, vec![(-20.0, 1), (-10.0, 1), (0.0, 1)]);
         assert_eq!(h.iter().map(|b| b.1).sum::<u32>(), 3);

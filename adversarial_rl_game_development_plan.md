@@ -798,19 +798,20 @@ Levels 14–16: 2v2, shared and centralised-critic team policies, communication,
 -   [x] Add environment unit and property tests.
 -   [x] Add headless episode runner.
 -   [x] Implement random agent.
--   [ ] Implement Q-learning agent with lesson-mode tracing.
--   [ ] Add Q-learning regression test.
+-   [x] Implement Q-learning agent.
+-   [x] Add Q-learning regression test.
 -   [x] Create Leptos app with amber terminal shell and theme tokens.
--   [ ] Run simulation and training in a Web Worker. *(Simulation done; training follows with Q-learning.)*
+-   [x] Run simulation and training in a Web Worker.
 -   [x] Phosphor Canvas2D renderer and style-sheet scene.
 -   [x] Keyboard/manual control (Level 0).
--   [ ] Tutorial engine and Level 0–1 tutorials. *(Text steps, depths and highlights done; Level 0 tutorial complete; Level 1 has its briefing only.)*
--   [ ] Train button, reward/episode graph, Q-value and policy views.
--   [ ] Live pseudocode walkthrough.
--   [ ] Learned-policy deployment.
--   [ ] Experiment serialisation and replay recording.
+-   [x] Tutorial engine and Level 0–1 tutorials: text at three depths, highlights, predictions and guided experiments checked in CI.
+-   [x] Train button, reward/episode graph, Q-value and policy views.
+-   [x] Live pseudocode walkthrough.
+-   [x] Q-table persistence in IndexedDB, and the `TrainingTarget` abstraction (local worker only).
+-   [x] Learned-policy deployment.
+-   [ ] Experiment serialisation and replay recording. *(Trained rafts are saved per level with a level-file hash; experiment specifications and run comparison are Milestone 2.)*
 -   [ ] Burn hardware spike on all three servers and the browser.
--   [ ] Level 2: hazards, lotus lure, reward editor, tutorial.
+-   [x] Level 2: hazards, lotus lure, reward editor, tutorial.
 -   [ ] Level 3: scripted Cyclops, Observation Builder, spec hashes, tutorial.
 -   [ ] Compare agent-only observation with agent + Cyclops.
 -   [ ] Playtest with a few friends or students and evaluate whether the loop is educational and enjoyable.

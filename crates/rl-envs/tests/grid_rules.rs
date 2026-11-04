@@ -26,12 +26,7 @@ fn shortest_path_reaches_goal_with_expected_return() {
     let mut w = load_world(SMALL).unwrap();
     w.reset(0);
     let mut total = 0.0;
-    for d in [
-        Direction::South,
-        Direction::East,
-        Direction::East,
-        Direction::North,
-    ] {
+    for d in [Direction::South, Direction::East, Direction::East, Direction::North] {
         let r = step(&mut w, d);
         total += r.agents[0].reward;
         if r.done() {
@@ -78,19 +73,13 @@ fn state_index_and_q_table_size() {
 
 #[test]
 fn validation_reports_every_problem_with_its_field() {
-    let bad = SMALL
-        .replace(r#""step": -1.0"#, r#""step": -1.0, "lotus": 1.0"#)
-        .replace(r#""S#G""#, r#""S#X""#);
+    let bad = SMALL.replace(r#""step": -1.0"#, r#""step": -1.0, "lotus": 1.0"#).replace(r#""S#G""#, r#""S#X""#);
     let def = LevelDef::parse(&bad).unwrap();
     let errors = rl_envs::GridWorld::compile(&def).unwrap_err().0;
     let fields: Vec<_> = errors.iter().map(|e| e.field.as_str()).collect();
     assert!(fields.contains(&"reward"), "{errors:?}");
     assert!(fields.contains(&"map"), "{errors:?}");
-    assert!(
-        errors
-            .iter()
-            .any(|e| e.message.contains("unknown character 'X'"))
-    );
+    assert!(errors.iter().any(|e| e.message.contains("unknown character 'X'")));
 }
 
 #[test]
@@ -104,24 +93,19 @@ fn best_return_comes_from_the_shortest_path() {
     let w = load_world(SMALL).unwrap();
     // S#G / ... : four moves around the wall, −1 each, +10 at the goal.
     assert_eq!(w.grid().best_return(0), Some((6.0, 4)));
-    let loom = load_world(include_str!(
-        "../../../content/levels/l00_calypsos_loom.ron"
-    ))
-    .unwrap();
+    let loom = load_world(include_str!("../../../content/levels/l00_calypsos_loom.ron")).unwrap();
     assert_eq!(loom.grid().best_return(0), Some((2.0, 8)));
 }
 
 #[test]
 fn best_return_challenge_rejects_unreachable_goals() {
-    let walled_in = SMALL
-        .replace("\"S#G\", \"...\"", "\"S#G\", \"##.\"")
-        .replace("truncation: (max_steps: 5),", "truncation: (max_steps: 5),\n  challenge: (objective: \"Reach it\", goal: BestReturn),");
+    let walled_in = SMALL.replace("\"S#G\", \"...\"", "\"S#G\", \"##.\"").replace(
+        "truncation: (max_steps: 5),",
+        "truncation: (max_steps: 5),\n  challenge: (objective: \"Reach it\", goal: BestReturn),",
+    );
     let def = LevelDef::parse(&walled_in).unwrap();
     let errors = rl_envs::GridWorld::compile(&def).unwrap_err();
-    assert!(
-        errors.to_string().contains("reachable within max_steps"),
-        "{errors}"
-    );
+    assert!(errors.to_string().contains("reachable within max_steps"), "{errors}");
 }
 
 #[test]
@@ -140,7 +124,9 @@ fn task_challenges_are_validated() {
     let with = |goal: &str| {
         let src = SMALL.replace(
             "truncation: (max_steps: 5),",
-            &format!("truncation: (max_steps: 5),\n  pilot: Agent,\n  challenge: (objective: \"Measure\", goal: {goal}),"),
+            &format!(
+                "truncation: (max_steps: 5),\n  pilot: Agent,\n  challenge: (objective: \"Measure\", goal: {goal}),"
+            ),
         );
         rl_envs::GridWorld::compile(&LevelDef::parse(&src).unwrap())
     };
@@ -166,10 +152,5 @@ fn task_challenges_are_validated() {
     assert!(errors.contains("need a BatchRun task"), "{errors}");
     assert!(errors.contains("bands must be"), "{errors}");
     assert!(errors.contains("valid answer index"), "{errors}");
-    assert!(
-        with("Tasks([])")
-            .unwrap_err()
-            .to_string()
-            .contains("at least one task")
-    );
+    assert!(with("Tasks([])").unwrap_err().to_string().contains("at least one task"));
 }

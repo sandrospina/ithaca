@@ -26,12 +26,7 @@ impl Rng {
     /// Creates a generator from a 64-bit seed.
     pub fn new(seed: u64) -> Self {
         let mut sm = seed;
-        let s = [
-            splitmix64(&mut sm),
-            splitmix64(&mut sm),
-            splitmix64(&mut sm),
-            splitmix64(&mut sm),
-        ];
+        let s = [splitmix64(&mut sm), splitmix64(&mut sm), splitmix64(&mut sm), splitmix64(&mut sm)];
         Self { s }
     }
 
@@ -104,11 +99,7 @@ mod tests {
         assert_eq!(first, FROZEN_SEED0);
     }
 
-    const FROZEN_SEED0: [u64; 3] = [
-        0x99EC_5F36_CB75_F2B4,
-        0xBF6E_1F78_4956_452A,
-        0x1A5F_849D_4933_E6E0,
-    ];
+    const FROZEN_SEED0: [u64; 3] = [0x99EC_5F36_CB75_F2B4, 0xBF6E_1F78_4956_452A, 0x1A5F_849D_4933_E6E0];
 
     #[test]
     fn below_is_roughly_uniform() {

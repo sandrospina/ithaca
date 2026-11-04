@@ -15,9 +15,7 @@ impl Worker for SimWorker {
     type Output = SimResponse;
 
     fn create(_scope: &WorkerScope<Self>) -> Self {
-        Self {
-            core: SimCore::default(),
-        }
+        Self { core: SimCore::default() }
     }
 
     fn update(&mut self, _scope: &WorkerScope<Self>, _msg: Self::Message) {}

@@ -3,12 +3,12 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use rl_envs::{BatchStat, GoalDef, QuestionDef, TaskDef};
+use rl_envs::{BatchStat, GoalDef, QuestionDef, SuccessDef, TaskDef};
 use rl_training::BatchReport;
 use serde::{Deserialize, Serialize};
 
 use crate::content::LEVELS;
-use crate::protocol::{Outcome, SailedBy, Snapshot};
+use crate::protocol::{DeployReport, Outcome, SailedBy, Snapshot};
 
 pub const STORAGE_KEY: &str = "reinforcement-odyssey.progress.v1";
 
@@ -45,6 +45,9 @@ pub enum AnswerOutcome {
 /// A task's state, for the objective checklist.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TaskState {
+    /// The task in a few words.
+    pub title: String,
+    /// The title with its requirement, e.g. `(9 of 10 test voyages)`.
     pub label: String,
     pub done: bool,
     /// False when the task needs a feature that is not built yet.
@@ -62,19 +65,12 @@ fn question_key(task: usize, question: usize) -> String {
 /// Formats a share in `[0, 1]` as a percentage without needless decimals.
 pub fn percent(share: f32) -> String {
     let p = share * 100.0;
-    if (p - p.round()).abs() < 1e-3 {
-        format!("{}%", p.round() as i64)
-    } else {
-        format!("{p:.1}%")
-    }
+    if (p - p.round()).abs() < 1e-3 { format!("{}%", p.round() as i64) } else { format!("{p:.1}%") }
 }
 
 /// Answer options for a statistic band question, e.g. `0% to 25%`.
 pub fn band_labels(bands: &[f32]) -> Vec<String> {
-    bands
-        .windows(2)
-        .map(|w| format!("{} to {}", percent(w[0]), percent(w[1])))
-        .collect()
+    bands.windows(2).map(|w| format!("{} to {}", percent(w[0]), percent(w[1]))).collect()
 }
 
 /// The value of a batch statistic.
@@ -93,10 +89,7 @@ pub fn correct_answer(question: &QuestionDef, report: Option<&BatchReport>) -> O
         QuestionDef::StatBand { stat, bands, .. } => {
             let value = batch_stat(report?, *stat)?;
             let last = bands.len() - 2;
-            let band = bands
-                .windows(2)
-                .position(|w| value >= w[0] && value < w[1])
-                .unwrap_or(last);
+            let band = bands.windows(2).position(|w| value >= w[0] && value < w[1]).unwrap_or(last);
             Some(Answer::Option(band as u32))
         }
     }
@@ -134,18 +127,12 @@ impl Progress {
     /// The first level is always open; each later level opens when the one
     /// before it is complete.
     pub fn is_unlocked(&self, index: usize) -> bool {
-        index == 0
-            || LEVELS
-                .get(index - 1)
-                .is_some_and(|prev| self.is_complete(prev.id))
+        index == 0 || LEVELS.get(index - 1).is_some_and(|prev| self.is_complete(prev.id))
     }
 
     /// The furthest level the player can open: where a returning player resumes.
     pub fn resume_index(&self) -> usize {
-        (0..LEVELS.len())
-            .rev()
-            .find(|&i| self.is_unlocked(i))
-            .unwrap_or(0)
+        (0..LEVELS.len()).rev().find(|&i| self.is_unlocked(i)).unwrap_or(0)
     }
 
     pub fn best(&self, level_id: &str) -> Option<f32> {
@@ -157,17 +144,12 @@ impl Progress {
     }
 
     fn mark(&mut self, level_id: &str, key: String) {
-        self.tasks
-            .entry(level_id.to_string())
-            .or_default()
-            .insert(key);
+        self.tasks.entry(level_id.to_string()).or_default().insert(key);
     }
 
     fn task_done(&self, level_id: &str, index: usize, task: &TaskDef) -> bool {
         match task {
-            TaskDef::Quiz { questions } => {
-                (0..questions.len()).all(|q| self.done(level_id, &question_key(index, q)))
-            }
+            TaskDef::Quiz { questions } => (0..questions.len()).all(|q| self.done(level_id, &question_key(index, q))),
             _ => self.done(level_id, &task_key(index)),
         }
     }
@@ -178,10 +160,7 @@ impl Progress {
         let GoalDef::Tasks(tasks) = goal else {
             return false;
         };
-        let all = tasks
-            .iter()
-            .enumerate()
-            .all(|(i, t)| self.task_done(level_id, i, t));
+        let all = tasks.iter().enumerate().all(|(i, t)| self.task_done(level_id, i, t));
         all && self.completed.insert(level_id.to_string())
     }
 
@@ -194,38 +173,31 @@ impl Progress {
             .iter()
             .enumerate()
             .map(|(i, task)| {
-                let label = match task {
-                    TaskDef::BatchRun { min_episodes } => {
-                        format!("run {min_episodes}+ random voyages")
-                    }
-                    TaskDef::ReplayBestSeed => "replay the best seed".into(),
+                let (title, requirement) = match task {
+                    TaskDef::BatchRun { min_episodes } => (format!("run {min_episodes}+ random voyages"), None),
+                    TaskDef::ReplayBestSeed => ("replay the best seed".into(), None),
                     TaskDef::Quiz { questions } => {
-                        let right = (0..questions.len())
-                            .filter(|&q| self.done(level_id, &question_key(i, q)))
-                            .count();
-                        format!("answer Calypso's questions {right}/{}", questions.len())
+                        let right = (0..questions.len()).filter(|&q| self.done(level_id, &question_key(i, q))).count();
+                        (format!("answer Calypso's questions {right}/{}", questions.len()), None)
                     }
-                    TaskDef::TrainAgent {
-                        threshold,
-                        eval_episodes,
-                        success,
-                        ..
-                    } => {
+                    TaskDef::TrainAgent { threshold, eval_episodes, success, label, .. } => {
                         let wins = (threshold * *eval_episodes as f32).ceil() as u32;
                         let what = match success {
-                            rl_envs::SuccessDef::ShortestRoute => "takes the shortest route",
-                            rl_envs::SuccessDef::ReachGoal => "reaches the shore",
+                            SuccessDef::ReachGoal => "reaches the shore",
+                            SuccessDef::ShortestRoute => "takes the shortest route",
+                            SuccessDef::SafeArrival => "reaches the shore without touching the rocks",
+                            SuccessDef::StuckOnLure => "never leaves the lure",
+                            SuccessDef::Dies => "ends its voyage in a whirlpool",
                         };
-                        format!(
-                            "train a raft that {what} in {wins} of {eval_episodes} test voyages"
-                        )
+                        let title = label.clone().unwrap_or_else(|| format!("train a raft that {what}"));
+                        (title, Some(format!("{wins} of {eval_episodes} test voyages")))
                     }
                 };
-                TaskState {
-                    label,
-                    done: self.task_done(level_id, i, task),
-                    available: !matches!(task, TaskDef::TrainAgent { .. }),
-                }
+                let label = match requirement {
+                    Some(r) => format!("{title} ({r})"),
+                    None => title.clone(),
+                };
+                TaskState { title, label, done: self.task_done(level_id, i, task), available: true }
             })
             .collect()
     }
@@ -237,10 +209,7 @@ impl Progress {
             return false;
         }
         if s.outcome == Outcome::ReachedShore {
-            let best = self
-                .best_return
-                .entry(s.level_id.clone())
-                .or_insert(f32::NEG_INFINITY);
+            let best = self.best_return.entry(s.level_id.clone()).or_insert(f32::NEG_INFINITY);
             *best = best.max(s.episode_return);
         }
         objective_met(s) && self.completed.insert(s.level_id.clone())
@@ -316,6 +285,15 @@ impl Progress {
         }
     }
 
+    /// Records a deployment: every training task it passed is done. Returns
+    /// true if this completed the level.
+    pub fn record_deploy(&mut self, level_id: &str, goal: &GoalDef, report: &DeployReport) -> bool {
+        for t in report.tasks.iter().filter(|t| t.passed) {
+            self.mark(level_id, task_key(t.task));
+        }
+        self.refresh(level_id, goal)
+    }
+
     pub fn question_done(&self, level_id: &str, task: usize, question: usize) -> bool {
         self.done(level_id, &question_key(task, question))
     }
@@ -336,10 +314,7 @@ mod tests {
 
     fn sail(moves: &[u32]) -> Snapshot {
         let mut sim = SimCore::default();
-        let mut last = snap(sim.handle(SimRequest::Load {
-            level_id: "l00_calypsos_loom".into(),
-            seed: 1,
-        }));
+        let mut last = snap(sim.handle(SimRequest::Load { level_id: "l00_calypsos_loom".into(), seed: 1 }));
         for &action in moves {
             last = snap(sim.handle(SimRequest::Step { action }));
         }
@@ -399,31 +374,18 @@ mod tests {
     fn percentages_and_band_labels_read_naturally() {
         assert_eq!(percent(0.25), "25%");
         assert_eq!(percent(0.001), "0.1%");
-        assert_eq!(
-            band_labels(&[0.0, 0.01, 0.05]),
-            vec!["0% to 1%", "1% to 5%"]
-        );
+        assert_eq!(band_labels(&[0.0, 0.01, 0.05]), vec!["0% to 1%", "1% to 5%"]);
     }
 
     /// Plays Level 1's checklist the way a player would.
     #[test]
     fn level_one_tasks_batch_replay_and_quiz() {
         let mut sim = SimCore::default();
-        let s = snap(sim.handle(SimRequest::Load {
-            level_id: "l01_the_raft".into(),
-            seed: 1,
-        }));
+        let s = snap(sim.handle(SimRequest::Load { level_id: "l01_the_raft".into(), seed: 1 }));
         let goal = s.objective.as_ref().unwrap().goal.clone();
-        let GoalDef::Tasks(tasks) = &goal else {
-            panic!("Level 1 uses tasks")
-        };
-        let quiz = tasks
-            .iter()
-            .position(|t| matches!(t, TaskDef::Quiz { .. }))
-            .unwrap();
-        let TaskDef::Quiz { questions } = &tasks[quiz] else {
-            unreachable!()
-        };
+        let GoalDef::Tasks(tasks) = &goal else { panic!("Level 1 uses tasks") };
+        let quiz = tasks.iter().position(|t| matches!(t, TaskDef::Quiz { .. })).unwrap();
+        let TaskDef::Quiz { questions } = &tasks[quiz] else { unreachable!() };
         let mut p = Progress::default();
         let id = "l01_the_raft";
 
@@ -432,19 +394,13 @@ mod tests {
         assert_eq!(outcome, AnswerOutcome::NeedsBatch);
 
         // A small batch does not satisfy the task; a large one does.
-        let small = match sim.handle(SimRequest::Batch {
-            first_seed: 1,
-            episodes: 20,
-        }) {
+        let small = match sim.handle(SimRequest::Batch { first_seed: 1, episodes: 20 }) {
             SimResponse::Batch(r) => *r,
             other => panic!("{other:?}"),
         };
         assert!(!p.record_batch(id, &goal, &small));
         assert!(!p.task_states(id, &goal)[0].done);
-        let report = match sim.handle(SimRequest::Batch {
-            first_seed: 1,
-            episodes: 100,
-        }) {
+        let report = match sim.handle(SimRequest::Batch { first_seed: 1, episodes: 100 }) {
             SimResponse::Batch(r) => *r,
             other => panic!("{other:?}"),
         };
@@ -455,9 +411,9 @@ mod tests {
         let best = *report.best_episode();
         let run = |sim: &mut SimCore, seed| {
             sim.handle(SimRequest::Reset { seed });
-            let mut s = snap(sim.handle(SimRequest::AgentStep));
+            let mut s = snap(sim.handle(SimRequest::AgentStep { trained: false }));
             while s.outcome == Outcome::Sailing {
-                s = snap(sim.handle(SimRequest::AgentStep));
+                s = snap(sim.handle(SimRequest::AgentStep { trained: false }));
             }
             s
         };
@@ -467,13 +423,7 @@ mod tests {
         assert!(p.task_states(id, &goal)[1].done);
 
         // Wrong answers are not recorded; right ones are.
-        let (outcome, _) = p.answer(
-            id,
-            &goal,
-            (quiz, 2),
-            Answer::Seed(best.seed + 1),
-            Some(&report),
-        );
+        let (outcome, _) = p.answer(id, &goal, (quiz, 2), Answer::Seed(best.seed + 1), Some(&report));
         assert_eq!(outcome, AnswerOutcome::Incorrect);
         for (q, question) in questions.iter().enumerate() {
             let right = correct_answer(question, Some(&report)).unwrap();
@@ -483,47 +433,57 @@ mod tests {
         }
         let states = p.task_states(id, &goal);
         assert!(states[..3].iter().all(|t| t.done), "{states:?}");
-        assert!(!states[3].done && !states[3].available);
-        assert!(
-            !p.is_complete(id),
-            "Level 1 needs a trained agent to complete"
-        );
+        assert!(!states[3].done, "training has not happened yet");
+        assert!(!p.is_complete(id), "Level 1 needs a trained agent to complete");
+    }
+
+    #[test]
+    fn completing_level_one_unlocks_level_two() {
+        let mut sim = SimCore::default();
+        let s = snap(sim.handle(SimRequest::Load { level_id: "l01_the_raft".into(), seed: 1 }));
+        let goal = s.objective.unwrap().goal;
+        let id = "l01_the_raft";
+        let mut p = Progress::default();
+        p.record(&sail(&[2, 2, 2, 2, 1, 1, 1, 1])); // Level 0
+        let report = match sim.handle(SimRequest::Batch { first_seed: 1, episodes: 100 }) {
+            SimResponse::Batch(r) => *r,
+            other => panic!("{other:?}"),
+        };
+        p.record_batch(id, &goal, &report);
+        sim.handle(SimRequest::Reset { seed: report.best_episode().seed });
+        let mut s = snap(sim.handle(SimRequest::AgentStep { trained: false }));
+        while s.outcome == Outcome::Sailing {
+            s = snap(sim.handle(SimRequest::AgentStep { trained: false }));
+        }
+        p.record_replay(&s, &report);
+        let GoalDef::Tasks(tasks) = &goal else { panic!() };
+        let TaskDef::Quiz { questions } = &tasks[2] else { panic!() };
+        for (q, question) in questions.iter().enumerate() {
+            p.answer(id, &goal, (2, q), correct_answer(question, Some(&report)).unwrap(), Some(&report));
+        }
+        assert!(!p.is_unlocked(2));
+        sim.handle(SimRequest::Train { episodes: 300 });
+        let SimResponse::Deploy(deployed) = sim.handle(SimRequest::Deploy) else { panic!() };
+        assert!(p.record_deploy(id, &goal, &deployed), "the last task completes the level");
+        assert!(p.is_complete(id));
+        assert!(p.is_unlocked(2));
     }
 
     #[test]
     fn stat_band_answers_follow_the_batch() {
-        let level =
-            rl_envs::LevelDef::parse(crate::content::level("l01_the_raft").unwrap().level_source)
-                .unwrap();
-        let GoalDef::Tasks(tasks) = level.challenge.unwrap().goal else {
-            panic!()
-        };
-        let TaskDef::Quiz { questions } = &tasks[2] else {
-            panic!()
-        };
+        let level = rl_envs::LevelDef::parse(crate::content::level("l01_the_raft").unwrap().level_source).unwrap();
+        let GoalDef::Tasks(tasks) = level.challenge.unwrap().goal else { panic!() };
+        let TaskDef::Quiz { questions } = &tasks[2] else { panic!() };
         let mut sim = SimCore::default();
-        sim.handle(SimRequest::Load {
-            level_id: "l01_the_raft".into(),
-            seed: 1,
-        });
-        let SimResponse::Batch(report) = sim.handle(SimRequest::Batch {
-            first_seed: 1,
-            episodes: 1000,
-        }) else {
+        sim.handle(SimRequest::Load { level_id: "l01_the_raft".into(), seed: 1 });
+        let SimResponse::Batch(report) = sim.handle(SimRequest::Batch { first_seed: 1, episodes: 1000 }) else {
             panic!()
         };
         // About 1 in 1,000 random voyages takes the shortest route: band "0% to 1%".
-        assert_eq!(
-            correct_answer(&questions[1], Some(&report)),
-            Some(Answer::Option(0))
-        );
+        assert_eq!(correct_answer(&questions[1], Some(&report)), Some(Answer::Option(0)));
         let reached = report.reached_goal_rate;
-        let Some(Answer::Option(band)) = correct_answer(&questions[0], Some(&report)) else {
-            panic!()
-        };
-        let QuestionDef::StatBand { bands, .. } = &questions[0] else {
-            panic!()
-        };
+        let Some(Answer::Option(band)) = correct_answer(&questions[0], Some(&report)) else { panic!() };
+        let QuestionDef::StatBand { bands, .. } = &questions[0] else { panic!() };
         assert!(reached >= bands[band as usize] && reached <= bands[band as usize + 1]);
     }
 }

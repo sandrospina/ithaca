@@ -25,6 +25,10 @@ pub struct LevelDef {
     pub agents: IndexMap<String, AgentDef>,
     /// Reward term name → weight.
     pub reward: IndexMap<String, f32>,
+    /// Optional level-specific names for reward terms in the reward editor,
+    /// e.g. `"lure": "each move in the lotus field"`.
+    #[serde(default)]
+    pub reward_labels: IndexMap<String, String>,
     pub observation: Vec<FeatureDef>,
     pub termination: Vec<TerminationDef>,
     pub truncation: TruncationDef,
@@ -57,11 +61,7 @@ impl LevelDef {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum EngineDef {
-    Grid {
-        width: u32,
-        height: u32,
-        moves: Moves,
-    },
+    Grid { width: u32, height: u32, moves: Moves },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -79,6 +79,13 @@ pub enum LegendEntry {
     Goal {
         term: String,
     },
+    /// A cell that pays the `hazard` term each step; lethal cells end the
+    /// episode and pay the `death` term instead.
+    Hazard {
+        lethal: bool,
+    },
+    /// A cell that pays the `lure` term each step the agent stays on it.
+    Lure,
     Wall,
     Open,
 }
@@ -115,6 +122,8 @@ pub enum Encoding {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TerminationDef {
     GoalReached,
+    /// Entering a lethal cell ends the episode.
+    Death,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -175,11 +184,7 @@ pub enum GoalDef {
     BestReturn,
     /// A trained agent must succeed in `threshold` of `eval_episodes`
     /// evaluation episodes on fixed seeds.
-    SuccessRate {
-        threshold: f32,
-        eval_episodes: u32,
-        eval_seeds: EvalSeeds,
-    },
+    SuccessRate { threshold: f32, eval_episodes: u32, eval_seeds: EvalSeeds },
     /// Every task must be done, in any order.
     Tasks(Vec<TaskDef>),
 }
@@ -199,6 +204,9 @@ pub enum TaskDef {
         eval_episodes: u32,
         eval_seeds: EvalSeeds,
         success: SuccessDef,
+        /// Player-facing checklist label; generated from `success` if absent.
+        #[serde(default)]
+        label: Option<String>,
     },
 }
 
@@ -209,6 +217,12 @@ pub enum SuccessDef {
     ReachGoal,
     /// Reaching a goal with the best possible return, i.e. by the shortest route.
     ShortestRoute,
+    /// Reaching a goal without ever ending a step on a hazard.
+    SafeArrival,
+    /// A pathology: running out of time with at least half the steps spent on a lure.
+    StuckOnLure,
+    /// A pathology: ending the episode in a lethal cell.
+    Dies,
 }
 
 /// A batch statistic a question can ask about.
@@ -225,21 +239,11 @@ pub enum BatchStat {
 pub enum QuestionDef {
     /// Which band contains a batch statistic? `bands` are ascending
     /// boundaries in `[0, 1]`; each adjacent pair is one answer option.
-    StatBand {
-        prompt: String,
-        stat: BatchStat,
-        bands: Vec<f32>,
-        explain: String,
-    },
+    StatBand { prompt: String, stat: BatchStat, bands: Vec<f32>, explain: String },
     /// Which seed gave the best episode in the latest batch?
     BestSeed { prompt: String, explain: String },
     /// A conceptual multiple-choice question with a fixed answer.
-    Choice {
-        prompt: String,
-        options: Vec<String>,
-        answer: u32,
-        explain: String,
-    },
+    Choice { prompt: String, options: Vec<String>, answer: u32, explain: String },
 }
 
 impl QuestionDef {

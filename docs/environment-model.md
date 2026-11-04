@@ -139,7 +139,7 @@ Level(
   ),
   pilot: Agent,                                              // who steers: Player (by hand) or Agent
   challenge: (
-    objective: "Escape the cave in 8 of 10 test voyages.",  // shown in the objective strip
+    objective: "Escape the cave in 8 of 10 test voyages.",  // shown in the objective pop-over
     goal: SuccessRate(threshold: 0.8, eval_episodes: 10, eval_seeds: Fixed(1000)),
   ),
   budget: (episodes: 2000, stars: [2000, 1000, 500]),

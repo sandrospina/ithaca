@@ -22,6 +22,7 @@ A player who learns "cyan triangle = my agent" in Level 1 must be able to rely o
 | Goal / objective | Circle with radiating ticks | `goal` gold `#FFD24D` | |
 | Wall / terrain | Solid line segments | `terrain` green `#33FF66` | The default phosphor colour |
 | Hazard / lethal cell | Cross-hatched fill | `hazard` orange `#FF7A1A` | Lethal = double hatch. Shape distinguishes it from adversary, not colour alone |
+| Lure (e.g. the lotus field) | Lotus flower outline | `goal` gold `#FFD24D` | Tempting like the goal by design; told apart by shape |
 | Reward event | Brief expanding ring | gold (positive) / magenta (negative) | Fades over ~300 ms |
 | Q-value / state value | Cell brightness | diverging: green (+) / magenta (−) | Brightness ∝ magnitude, normalised per view |
 | Policy | Thin arrow per cell / heading line | `policy` white-green `#C8FFD8` | Length or brightness ∝ action probability / Q margin |

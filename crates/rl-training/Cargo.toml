@@ -8,9 +8,9 @@ publish.workspace = true
 
 [dependencies]
 rl-core.workspace = true
+rl-agents.workspace = true
 serde.workspace = true
 
 [dev-dependencies]
 rl-envs.workspace = true
-rl-agents.workspace = true
 proptest.workspace = true

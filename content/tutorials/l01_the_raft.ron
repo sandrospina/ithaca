@@ -1,7 +1,7 @@
 // Tutorial for Level 1 — The Raft.
 // The player hands the raft to an agent, measures what an untrained agent
-// can really do, and learns why luck is not learning. Training (Q-learning)
-// arrives in Milestone 1.
+// can really do, learns why luck is not learning, then watches Q-learning
+// update its table one move at a time and tests the discount γ.
 Tutorial(
   schema: 1,
   id: "l01_the_raft",
@@ -47,7 +47,7 @@ Tutorial(
       highlight: [BestSeed],
     ),
     Say(
-      beat: Predict,
+      beat: Challenge,
       title: "Calypso's questions",
       text: (
         story: "Before you may build a raft that learns, show me you understand the one that cannot.",
@@ -66,13 +66,78 @@ Tutorial(
       highlight: [State, Action],
     ),
     Say(
-      beat: Challenge,
+      beat: Explainer,
+      title: "One update at a time",
+      text: (
+        story: "Watch the raft learn one stroke at a time. After every stroke it changes one number in its memory, a little.",
+        intuition: "Open TRAIN and press STEP THROUGH. STEP LINE walks through Q-learning one line at a time, with the real numbers from your raft. Each move changes exactly one Q-value: watch it flash on the map. FINISH EPISODE ends the voyage. FAST keeps training so you can watch the arrows appear. These are real training episodes: they count toward your budget.",
+        math: "Each move: choose a by ε-greedy, observe r and s', then target = r + γ · max_a' Q(s', a') and Q(s, a) ← Q(s, a) + α · (target − Q(s, a)). At the shore the episode terminates, so target = r. Click any cell to read its four Q-values.",
+      ),
+      highlight: [Walkthrough, Train, QValues],
+    ),
+    Predict(
+      beat: Predict,
+      title: "A short-sighted raft",
+      text: (
+        story: "A sailor who only cares about the next wave. Does he ever get home?",
+        intuition: "The discount γ sets how much later rewards count. Your raft so far used γ = 0.95. Predict what happens with γ = 0.1, then run the experiment: a new raft trained for 300 episodes with that one change.",
+        math: "With discount γ, a reward k moves away is worth γ^k now. At γ = 0.1 the shore's +10 is worth 1 from two moves away and 0.01 from four.",
+      ),
+      highlight: [QValues],
+      question: "With γ = 0.1, how will the trained raft sail the ten test seeds?",
+      options: [
+        "Like γ = 0.95: the shortest route every time.",
+        "It still reaches the shore, but sometimes wanders first.",
+        "It never reaches the shore.",
+      ],
+      answer: 1,
+      explain: "Near the shore the raft knows the way. Far from it, every move is worth almost exactly the same, about −1.11, so it cannot tell which way is home and sometimes drifts. Click a cell far from the shore and compare its four Q-values.",
+      experiment: (gamma: 0.1, training_seed: 1, episodes: 300, expect: [
+        (measure: ReachGoal, at_least: 0.9),
+        (measure: ShortestRoute, at_most: 0.8),
+      ]),
+    ),
+    Experiment(
+      beat: GuidedExperiment,
+      title: "A far-sighted raft",
+      text: (
+        story: "Now a sailor who keeps the shore in mind from the first stroke.",
+        intuition: "Same training seed, same 300 episodes, only γ = 0.95. Run it and compare the arrows and the Q-values far from the shore: now every cell knows which way is home.",
+        math: "At γ = 0.95 the values fall smoothly with distance from the shore, so the greedy action always points along a shortest path.",
+      ),
+      highlight: [QValues, Arena],
+      experiment: (gamma: 0.95, training_seed: 1, episodes: 300, expect: [
+        (measure: ShortestRoute, at_least: 0.9),
+      ]),
+    ),
+    Say(
+      beat: GuidedExperiment,
       title: "Train the raft",
       text: (
-        story: "When the loom is ready, you will teach the raft yourself.",
-        intuition: "The last task: a trained raft that takes the shortest route in 9 of 10 test voyages, something the random agent almost never does. The TRAIN button unlocks with Q-learning in the next build.",
+        story: "Now teach the raft. Let it sail, err, and remember.",
+        intuition: "Open TRAIN and train for 300 episodes. Watch the learning curve: early episodes wander like the random agent, later ones climb toward +2 as the Q-table fills in. Exploration keeps some training episodes noisy.",
+        math: "After each move: Q(s, a) ← Q(s, a) + α · (r + γ · max_a' Q(s', a') − Q(s, a)). With ε = 0.1, one move in ten is random during training.",
       ),
-      highlight: [Objective],
+      highlight: [Train],
+    ),
+    Say(
+      beat: Challenge,
+      title: "Deploy it",
+      text: (
+        story: "A sailor is judged on the voyage, not the practice.",
+        intuition: "Open DEPLOY. The trained raft sails ten fixed test seeds with no exploration. It must take the shortest route in 9 of them, something the random agent almost never does. Fewer training episodes earn more stars. Back in the arena, the arrows show the move it prefers in each cell.",
+        math: "Deployment uses the greedy policy π(s) = argmax_a Q(s, a). Success means the return equals the best possible, +2.",
+      ),
+      highlight: [Deploy, Objective],
+    ),
+    Say(
+      beat: Debrief,
+      title: "From luck to learning",
+      text: (
+        story: "The random raft found the shore by chance. Yours finds it by memory. Next, the sea will test whether you can say what you want.",
+        intuition: "The trained raft succeeds on every test seed, not just a lucky one: that is the difference between a policy and a best case. Its knowledge is the Q-table, one value per cell and move, learned purely from rewards. In the next level you will see how much depends on what those rewards say.",
+      ),
+      highlight: [Arena],
     ),
   ],
 )

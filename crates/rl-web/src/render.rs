@@ -6,6 +6,8 @@
 use std::f64::consts::{PI, TAU};
 
 use rl_core::{RenderEvent, RenderModel};
+
+use crate::protocol::CellPolicy;
 use rl_theme as theme;
 use web_sys::CanvasRenderingContext2d as Ctx;
 
@@ -47,11 +49,7 @@ impl RenderState {
     /// instead of gliding (used on reset).
     pub fn on_snapshot(&mut self, model: &RenderModel, now: f64, snap: bool) {
         if snap || self.displayed.len() != model.agents.len() {
-            self.displayed = model
-                .agents
-                .iter()
-                .map(|a| (f64::from(a.position.0), f64::from(a.position.1)))
-                .collect();
+            self.displayed = model.agents.iter().map(|a| (f64::from(a.position.0), f64::from(a.position.1))).collect();
             self.trails = vec![Vec::new(); model.agents.len()];
             self.flashes.clear();
         }
@@ -77,17 +75,10 @@ impl RenderState {
         let dt = self.last_frame.map_or(0.0, |t| (now - t).max(0.0));
         self.last_frame = Some(now);
         let k = (dt / 1000.0 * 18.0).min(1.0);
-        for ((d, a), trail) in self
-            .displayed
-            .iter_mut()
-            .zip(&model.agents)
-            .zip(&mut self.trails)
-        {
+        for ((d, a), trail) in self.displayed.iter_mut().zip(&model.agents).zip(&mut self.trails) {
             d.0 += (f64::from(a.position.0) - d.0) * k;
             d.1 += (f64::from(a.position.1) - d.1) * k;
-            let moved = trail
-                .last()
-                .is_none_or(|&(x, y, _)| (x - d.0).abs() + (y - d.1).abs() > 0.01);
+            let moved = trail.last().is_none_or(|&(x, y, _)| (x - d.0).abs() + (y - d.1).abs() > 0.01);
             if moved {
                 trail.push((d.0, d.1, now));
             }
@@ -95,6 +86,50 @@ impl RenderState {
         }
         self.flashes.retain(|f| now - f.born < RING_MS);
     }
+}
+
+/// How long the flash on an updated Q-value lasts, in milliseconds.
+const UPDATE_MS: f64 = 1200.0;
+
+/// One Q-value that just changed: its cell and action.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Updated {
+    pub cell: (i32, i32),
+    pub action: u32,
+    pub born: f64,
+}
+
+/// Cell markers drawn over the map.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Marks {
+    /// The cell whose Q-values the inspector shows.
+    pub selected: Option<(i32, i32)>,
+    pub updated: Option<Updated>,
+}
+
+/// Arena geometry: cell size and the top-left corner, in canvas pixels.
+fn layout(model: &RenderModel) -> (f64, f64, f64) {
+    let cols = f64::from(model.width);
+    let rows = f64::from(model.height);
+    let cell = ((CANVAS_SIZE - 2.0 * MARGIN) / cols).min((CANVAS_SIZE - 2.0 * MARGIN) / rows);
+    (cell, (CANVAS_SIZE - cell * cols) / 2.0, (CANVAS_SIZE - cell * rows) / 2.0)
+}
+
+/// The cell under a point given in canvas pixels, if any.
+pub fn cell_at(model: &RenderModel, x: f64, y: f64) -> Option<(i32, i32)> {
+    let (cell, ox, oy) = layout(model);
+    let (cx, cy) = (((x - ox) / cell).floor(), ((y - oy) / cell).floor());
+    (cx >= 0.0 && cy >= 0.0 && cx < f64::from(model.width) && cy < f64::from(model.height))
+        .then_some((cx as i32, cy as i32))
+}
+
+/// What is drawn over the world besides its own glyphs.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Layers<'a> {
+    pub hl: Highlights,
+    /// The learned Q-values, shown as shading and arrows.
+    pub policy: Option<&'a [CellPolicy]>,
+    pub marks: Marks,
 }
 
 /// Which elements a tutorial step is pointing at.
@@ -152,22 +187,14 @@ fn draw_trail(
 }
 
 /// Draws one frame of a world.
-pub fn draw_world(
-    ctx: &Ctx,
-    model: &RenderModel,
-    state: &mut RenderState,
-    now: f64,
-    hl: Highlights,
-    fx: Effects,
-) {
+pub fn draw_world(ctx: &Ctx, model: &RenderModel, state: &mut RenderState, now: f64, fx: Effects, layers: Layers<'_>) {
+    let Layers { hl, policy, marks } = layers;
     state.advance(model, now);
     clear(ctx);
 
     let cols = f64::from(model.width);
     let rows = f64::from(model.height);
-    let cell = ((CANVAS_SIZE - 2.0 * MARGIN) / cols).min((CANVAS_SIZE - 2.0 * MARGIN) / rows);
-    let ox = (CANVAS_SIZE - cell * cols) / 2.0;
-    let oy = (CANVAS_SIZE - cell * rows) / 2.0;
+    let (cell, ox, oy) = layout(model);
     let to_px = |x: f64, y: f64| (ox + x * cell, oy + y * cell);
 
     // Graticule.
@@ -193,9 +220,31 @@ pub fn draw_world(
     ctx.set_stroke_style_str(theme::TERRAIN.hex);
     ctx.stroke_rect(ox, oy, cols * cell, rows * cell);
 
+    if let Some(policy) = policy {
+        draw_policy_overlay(ctx, policy, &to_px, cell, fx);
+    }
+    if let Some(u) = marks.updated {
+        let t = (now - u.born) / UPDATE_MS;
+        if (0.0..1.0).contains(&t) {
+            let (px, py) = to_px(f64::from(u.cell.0), f64::from(u.cell.1));
+            draw_updated_value(ctx, px, py, cell, u.action, t, fx);
+        }
+    }
     for &(x, y) in &model.walls {
         let (px, py) = to_px(f64::from(x), f64::from(y));
         draw_wall(ctx, px, py, cell, fx);
+    }
+    for &(x, y) in &model.hazards {
+        let (px, py) = to_px(f64::from(x), f64::from(y));
+        draw_hazard(ctx, px, py, cell, false, fx);
+    }
+    for &(x, y) in &model.lethal {
+        let (px, py) = to_px(f64::from(x), f64::from(y));
+        draw_hazard(ctx, px, py, cell, true, fx);
+    }
+    for &(x, y) in &model.lures {
+        let (px, py) = to_px(f64::from(x) + 0.5, f64::from(y) + 0.5);
+        draw_lotus(ctx, px, py, cell, now, fx);
     }
     for &(x, y) in &model.goals {
         let (px, py) = to_px(f64::from(x) + 0.5, f64::from(y) + 0.5);
@@ -216,15 +265,7 @@ pub fn draw_world(
     }
 
     for (a, trail) in model.agents.iter().zip(&state.trails) {
-        draw_trail(
-            ctx,
-            trail,
-            theme::glyph_colour(a.glyph),
-            now,
-            &to_px,
-            cell,
-            fx,
-        );
+        draw_trail(ctx, trail, theme::glyph_colour(a.glyph), now, &to_px, cell, fx);
     }
     for (a, &(dx, dy)) in model.agents.iter().zip(&state.displayed) {
         let (px, py) = to_px(dx, dy);
@@ -236,20 +277,108 @@ pub fn draw_world(
             draw_brackets(ctx, px, py, cell, now, fx);
         }
     }
+    if let Some((x, y)) = marks.selected {
+        let (px, py) = to_px(f64::from(x) + 0.5, f64::from(y) + 0.5);
+        draw_brackets(ctx, px, py, cell, now, fx);
+    }
     ctx.set_shadow_blur(0.0);
+}
+
+/// A Q-value just changed: the cell flashes and the edge on the side of
+/// the updated action lights up, fading over `UPDATE_MS`.
+fn draw_updated_value(ctx: &Ctx, x: f64, y: f64, cell: f64, action: u32, t: f64, fx: Effects) {
+    let fade = 1.0 - t;
+    ctx.set_shadow_blur(0.0);
+    ctx.set_fill_style_str(&theme::rgba(theme::POLICY.hex, 0.35 * fade));
+    ctx.fill_rect(x + 1.0, y + 1.0, cell - 2.0, cell - 2.0);
+    let inset = cell * 0.08;
+    let (x0, y0, x1, y1) = match action {
+        0 => (x + inset, y + 3.0, x + cell - inset, y + 3.0),
+        1 => (x + cell - 3.0, y + inset, x + cell - 3.0, y + cell - inset),
+        2 => (x + inset, y + cell - 3.0, x + cell - inset, y + cell - 3.0),
+        _ => (x + 3.0, y + inset, x + 3.0, y + cell - inset),
+    };
+    set_glow(ctx, theme::POLICY.hex, 10.0, fx);
+    ctx.set_global_alpha(fade);
+    ctx.set_line_width(4.0);
+    ctx.set_stroke_style_str(theme::POLICY.hex);
+    ctx.begin_path();
+    ctx.move_to(x0, y0);
+    ctx.line_to(x1, y1);
+    ctx.stroke();
+    ctx.set_global_alpha(1.0);
+}
+
+/// The learned policy: each cell shaded by its best Q-value (green positive,
+/// magenta negative, normalised across the map) and an arrow for the
+/// preferred move, longer when the preference is clearer.
+fn draw_policy_overlay(
+    ctx: &Ctx,
+    policy: &[CellPolicy],
+    to_px: &dyn Fn(f64, f64) -> (f64, f64),
+    cell: f64,
+    fx: Effects,
+) {
+    let best = |v: &[f32; 4]| v.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    let scale = policy.iter().map(|c| best(&c.values).abs()).fold(0.0f32, f32::max);
+    if scale <= 1e-6 {
+        return; // untrained: nothing learned yet
+    }
+    for c in policy {
+        let (x, y) = (f64::from(c.cell.0), f64::from(c.cell.1));
+        let (px, py) = to_px(x, y);
+        let top = best(&c.values);
+        draw_value_cell(ctx, px, py, cell, f64::from(top / scale));
+        let low = c.values.iter().copied().fold(f32::INFINITY, f32::min);
+        if top - low < 1e-6 {
+            continue; // no preference yet
+        }
+        let action = c.values.iter().position(|&v| v == top).unwrap_or(0);
+        let second = c.values.iter().copied().filter(|&v| v < top).fold(f32::NEG_INFINITY, f32::max).max(low);
+        let strength = f64::from(((top - second) / (top - low)).clamp(0.15, 1.0));
+        let heading = [-PI / 2.0, 0.0, PI / 2.0, PI][action];
+        let (cx, cy) = to_px(x + 0.5, y + 0.5);
+        draw_policy_arrow(ctx, cx, cy, cell, heading, strength, fx);
+    }
 }
 
 // ---------------------------------------------------------------- glyphs
 
+/// Lure: a lotus flower outline in gold. Tempting like the goal, told apart by shape.
+pub fn draw_lotus(ctx: &Ctx, cx: f64, cy: f64, cell: f64, now: f64, fx: Effects) {
+    let r = cell * 0.26;
+    let sway = (now / 1400.0).sin() * 0.06;
+    set_glow(ctx, theme::GOAL.hex, 8.0, fx);
+    ctx.set_line_width(1.5);
+    ctx.set_stroke_style_str(theme::GOAL.hex);
+    ctx.set_global_alpha(0.85);
+    for k in 0..5 {
+        let a = -PI / 2.0 + (f64::from(k) - 2.0) * 0.55 + sway;
+        let (tx, ty) = (cx + a.cos() * r, cy + 0.25 * r + a.sin() * r);
+        let base = (cx, cy + 0.35 * r);
+        let side = 0.22;
+        ctx.begin_path();
+        ctx.move_to(base.0, base.1);
+        ctx.quadratic_curve_to(base.0 + (a - side).cos() * r * 0.9, base.1 + (a - side).sin() * r * 0.9, tx, ty);
+        ctx.quadratic_curve_to(
+            base.0 + (a + side).cos() * r * 0.9,
+            base.1 + (a + side).sin() * r * 0.9,
+            base.0,
+            base.1,
+        );
+        ctx.stroke();
+    }
+    ctx.begin_path();
+    ctx.move_to(cx - r * 0.9, cy + r * 0.55);
+    ctx.line_to(cx + r * 0.9, cy + r * 0.55);
+    ctx.stroke();
+    ctx.set_global_alpha(1.0);
+}
+
 /// Player agent: a triangle pointing along its heading.
 pub fn draw_agent(ctx: &Ctx, cx: f64, cy: f64, cell: f64, heading: f64, fx: Effects) {
     let r = cell * 0.32;
-    let pts = [
-        (r, 0.0),
-        (-r * 0.75, r * 0.7),
-        (-r * 0.45, 0.0),
-        (-r * 0.75, -r * 0.7),
-    ];
+    let pts = [(r, 0.0), (-r * 0.75, r * 0.7), (-r * 0.45, 0.0), (-r * 0.75, -r * 0.7)];
     let (s, c) = heading.sin_cos();
     set_glow(ctx, theme::AGENT.hex, 14.0, fx);
     ctx.set_line_width(2.5);
@@ -347,11 +476,7 @@ pub fn draw_hazard(ctx: &Ctx, x: f64, y: f64, cell: f64, lethal: bool, fx: Effec
 
 /// Reward event: an expanding ring, gold for positive, magenta for negative.
 pub fn draw_reward_ring(ctx: &Ctx, cx: f64, cy: f64, cell: f64, t: f64, value: f64, fx: Effects) {
-    let colour = if value >= 0.0 {
-        theme::GOAL.hex
-    } else {
-        theme::ADVERSARY.hex
-    };
+    let colour = if value >= 0.0 { theme::GOAL.hex } else { theme::ADVERSARY.hex };
     set_glow(ctx, colour, 12.0, fx);
     ctx.set_global_alpha((1.0 - t).clamp(0.0, 1.0));
     ctx.set_line_width(2.0);
@@ -380,15 +505,7 @@ fn draw_spark(ctx: &Ctx, cx: f64, cy: f64, cell: f64, t: f64, fx: Effects) {
 }
 
 /// Policy: a thin arrow; length and brightness follow `strength` in [0, 1].
-pub fn draw_policy_arrow(
-    ctx: &Ctx,
-    cx: f64,
-    cy: f64,
-    cell: f64,
-    heading: f64,
-    strength: f64,
-    fx: Effects,
-) {
+pub fn draw_policy_arrow(ctx: &Ctx, cx: f64, cy: f64, cell: f64, heading: f64, strength: f64, fx: Effects) {
     let len = cell * (0.15 + 0.25 * strength);
     let (s, c) = heading.sin_cos();
     set_glow(ctx, theme::POLICY.hex, 6.0, fx);
@@ -411,11 +528,7 @@ pub fn draw_policy_arrow(
 
 /// Value cell: brightness follows |value|; green positive, magenta negative.
 pub fn draw_value_cell(ctx: &Ctx, x: f64, y: f64, cell: f64, value: f64) {
-    let colour = if value >= 0.0 {
-        theme::TERRAIN.hex
-    } else {
-        theme::ADVERSARY.hex
-    };
+    let colour = if value >= 0.0 { theme::TERRAIN.hex } else { theme::ADVERSARY.hex };
     ctx.set_shadow_blur(0.0);
     ctx.set_fill_style_str(&theme::rgba(colour, 0.08 + 0.5 * value.abs().min(1.0)));
     ctx.fill_rect(x + 1.0, y + 1.0, cell - 2.0, cell - 2.0);
@@ -444,21 +557,10 @@ pub fn draw_fog(ctx: &Ctx, x: f64, y: f64, cell: f64, now: f64) {
 }
 
 /// Message glyph (Level 15): a Greek letter in the sender's colour.
-pub fn draw_message(
-    ctx: &Ctx,
-    cx: f64,
-    cy: f64,
-    cell: f64,
-    symbol: &str,
-    colour: &str,
-    fx: Effects,
-) {
+pub fn draw_message(ctx: &Ctx, cx: f64, cy: f64, cell: f64, symbol: &str, colour: &str, fx: Effects) {
     set_glow(ctx, colour, 10.0, fx);
     ctx.set_fill_style_str(colour);
-    ctx.set_font(&format!(
-        "{}px 'IBM Plex Mono', monospace",
-        (cell * 0.45) as u32
-    ));
+    ctx.set_font(&format!("{}px 'IBM Plex Mono', monospace", (cell * 0.45) as u32));
     ctx.set_text_align("center");
     ctx.set_text_baseline("middle");
     let _ = ctx.fill_text(symbol, cx, cy);
@@ -466,13 +568,7 @@ pub fn draw_message(
 
 /// Resource bar: segmented, always drawn in the same place on screen.
 /// `rect` is `(x, y, width, height)` in pixels.
-pub fn draw_resource_bar(
-    ctx: &Ctx,
-    rect: (f64, f64, f64, f64),
-    fraction: f64,
-    colour: &str,
-    fx: Effects,
-) {
+pub fn draw_resource_bar(ctx: &Ctx, rect: (f64, f64, f64, f64), fraction: f64, colour: &str, fx: Effects) {
     let (x, y, w, h) = rect;
     let segments = 10;
     let gap = 2.0;
@@ -516,27 +612,28 @@ fn draw_brackets(ctx: &Ctx, cx: f64, cy: f64, cell: f64, now: f64, fx: Effects) 
 /// visual reference for new levels (docs/visual-style.md §6).
 pub fn draw_style_sheet(ctx: &Ctx, now: f64, fx: Effects) {
     clear(ctx);
-    let cols = 4.0;
-    let tile = CANVAS_SIZE / cols;
-    let cell = tile * 0.5;
+    const COLS: usize = 5;
+    let tile_w = CANVAS_SIZE / COLS as f64;
+    let tile_h = CANVAS_SIZE / 4.0;
+    let cell = tile_w.min(tile_h) * 0.5;
     let label = |i: usize, text: &str, token: &str| {
-        let (col, row) = ((i % 4) as f64, (i / 4) as f64);
+        let (col, row) = ((i % COLS) as f64, (i / COLS) as f64);
         ctx.set_shadow_blur(0.0);
         ctx.set_fill_style_str(theme::SHELL_FG.hex);
-        ctx.set_font("15px 'IBM Plex Mono', monospace");
+        ctx.set_font("13px 'IBM Plex Mono', monospace");
         ctx.set_text_align("center");
         ctx.set_text_baseline("alphabetic");
-        let _ = ctx.fill_text(text, col * tile + tile / 2.0, row * tile + tile - 30.0);
+        let _ = ctx.fill_text(text, col * tile_w + tile_w / 2.0, row * tile_h + tile_h - 30.0);
         ctx.set_fill_style_str(theme::SHELL_DIM.hex);
-        ctx.set_font("12px 'IBM Plex Mono', monospace");
-        let _ = ctx.fill_text(token, col * tile + tile / 2.0, row * tile + tile - 12.0);
+        ctx.set_font("11px 'IBM Plex Mono', monospace");
+        let _ = ctx.fill_text(token, col * tile_w + tile_w / 2.0, row * tile_h + tile_h - 14.0);
     };
     let centre = |i: usize| {
-        let (col, row) = ((i % 4) as f64, (i / 4) as f64);
-        (col * tile + tile / 2.0, row * tile + tile / 2.0 - 14.0)
+        let (col, row) = ((i % COLS) as f64, (i / COLS) as f64);
+        (col * tile_w + tile_w / 2.0, row * tile_h + tile_h / 2.0 - 18.0)
     };
 
-    let items: [(&str, &str); 16] = [
+    let items: [(&str, &str); 17] = [
         ("agent", theme::AGENT.name),
         ("adversary", theme::ADVERSARY.name),
         ("goal", theme::GOAL.name),
@@ -553,6 +650,7 @@ pub fn draw_style_sheet(ctx: &Ctx, now: f64, fx: Effects) {
         ("highlight", theme::SHELL_HI.name),
         ("teammate", theme::AGENT.name),
         ("bump", theme::TERRAIN.name),
+        ("lure (lotus)", theme::GOAL.name),
     ];
     for (i, (text, token)) in items.iter().enumerate() {
         let (cx, cy) = centre(i);
@@ -583,20 +681,8 @@ pub fn draw_style_sheet(ctx: &Ctx, now: f64, fx: Effects) {
             10 => draw_fog(ctx, x0, y0, cell, now),
             11 => draw_message(ctx, cx, cy, cell, "Δ", theme::AGENT.hex, fx),
             12 => {
-                draw_resource_bar(
-                    ctx,
-                    (x0 - 10.0, cy - 16.0, cell + 20.0, 10.0),
-                    0.7,
-                    theme::GOAL.hex,
-                    fx,
-                );
-                draw_resource_bar(
-                    ctx,
-                    (x0 - 10.0, cy + 4.0, cell + 20.0, 10.0),
-                    0.3,
-                    theme::HAZARD.hex,
-                    fx,
-                );
+                draw_resource_bar(ctx, (x0 - 10.0, cy - 16.0, cell + 20.0, 10.0), 0.7, theme::GOAL.hex, fx);
+                draw_resource_bar(ctx, (x0 - 10.0, cy + 4.0, cell + 20.0, 10.0), 0.3, theme::HAZARD.hex, fx);
             }
             13 => draw_brackets(ctx, cx, cy, cell, now, fx),
             14 => {
@@ -604,7 +690,8 @@ pub fn draw_style_sheet(ctx: &Ctx, now: f64, fx: Effects) {
                 draw_agent(ctx, cx, cy, cell, -PI / 2.0, fx);
                 ctx.set_global_alpha(1.0);
             }
-            _ => draw_spark(ctx, cx, cy, cell, t, fx),
+            15 => draw_spark(ctx, cx, cy, cell, t, fx),
+            _ => draw_lotus(ctx, cx, cy, cell, now, fx),
         }
         label(i, text, token);
     }

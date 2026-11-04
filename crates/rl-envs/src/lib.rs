@@ -10,9 +10,7 @@ pub mod level;
 pub mod validate;
 
 pub use grid::{Direction, GridWorld};
-pub use level::{
-    BatchStat, ChallengeDef, EvalSeeds, GoalDef, LevelDef, Pilot, QuestionDef, SuccessDef, TaskDef,
-};
+pub use level::{BatchStat, ChallengeDef, EvalSeeds, GoalDef, LevelDef, Pilot, QuestionDef, SuccessDef, TaskDef};
 pub use validate::MAX_BATCH_EPISODES;
 pub use validate::{LevelError, LevelErrors};
 

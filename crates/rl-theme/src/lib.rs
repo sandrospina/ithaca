@@ -41,18 +41,15 @@ pub fn glyph_colour(glyph: Glyph) -> &'static str {
         Glyph::Terrain => TERRAIN.hex,
         Glyph::Hazard => HAZARD.hex,
         Glyph::Policy => POLICY.hex,
+        // A lure is tempting by design: gold like the goal, told apart by its lotus shape.
+        Glyph::Lure => GOAL.hex,
     }
 }
 
 /// Converts `#RRGGBB` plus an alpha in `[0, 1]` to a CSS `rgba(...)` string.
 pub fn rgba(hex: &str, alpha: f64) -> String {
     let v = u32::from_str_radix(hex.trim_start_matches('#'), 16).unwrap_or(0);
-    format!(
-        "rgba({}, {}, {}, {alpha:.3})",
-        (v >> 16) & 0xFF,
-        (v >> 8) & 0xFF,
-        v & 0xFF
-    )
+    format!("rgba({}, {}, {}, {alpha:.3})", (v >> 16) & 0xFF, (v >> 8) & 0xFF, v & 0xFF)
 }
 
 #[cfg(test)]

@@ -15,17 +15,8 @@ fn every_tutorial_file_is_valid_and_matches_a_level() {
         }
         let source = std::fs::read_to_string(&path).unwrap();
         let def = TutorialDef::parse(&source).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
-        assert_eq!(
-            format!("{}.ron", def.id),
-            path.file_name().unwrap().to_string_lossy()
-        );
-        assert!(
-            root.join("levels")
-                .join(format!("{}.ron", def.level))
-                .exists(),
-            "{}: unknown level",
-            def.id
-        );
+        assert_eq!(format!("{}.ron", def.id), path.file_name().unwrap().to_string_lossy());
+        assert!(root.join("levels").join(format!("{}.ron", def.level)).exists(), "{}: unknown level", def.id);
         count += 1;
     }
     assert!(count >= 2);

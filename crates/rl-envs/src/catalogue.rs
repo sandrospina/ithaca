@@ -10,16 +10,37 @@ pub enum RewardTerm {
     GoalReached,
     /// Paid every step, usually negative, to encourage short paths.
     Step,
+    /// Paid every step the agent ends on a hazard cell (e.g. rocks).
+    Hazard,
+    /// Paid when the agent enters a lethal cell (e.g. a whirlpool). Ends the episode.
+    Death,
+    /// Paid every step the agent ends on a lure cell (e.g. the lotus field).
+    Lure,
 }
 
 impl RewardTerm {
-    pub const ALL: [RewardTerm; 2] = [RewardTerm::GoalReached, RewardTerm::Step];
+    pub const ALL: [RewardTerm; 5] =
+        [RewardTerm::GoalReached, RewardTerm::Step, RewardTerm::Hazard, RewardTerm::Death, RewardTerm::Lure];
     pub const COUNT: usize = Self::ALL.len();
 
     pub fn name(self) -> &'static str {
         match self {
             RewardTerm::GoalReached => "goal_reached",
             RewardTerm::Step => "step",
+            RewardTerm::Hazard => "hazard",
+            RewardTerm::Death => "death",
+            RewardTerm::Lure => "lure",
+        }
+    }
+
+    /// Plain description for the reward editor, unless the level overrides it.
+    pub fn description(self) -> &'static str {
+        match self {
+            RewardTerm::GoalReached => "reaching the goal",
+            RewardTerm::Step => "each move",
+            RewardTerm::Hazard => "each move on a hazard",
+            RewardTerm::Death => "entering a lethal cell",
+            RewardTerm::Lure => "each move inside a lure",
         }
     }
 

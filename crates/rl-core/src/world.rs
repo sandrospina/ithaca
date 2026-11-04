@@ -24,6 +24,21 @@ pub enum StepEvent {
         agent: AgentId,
         at: (i32, i32),
     },
+    /// The agent entered a lethal cell; its episode ends.
+    Died {
+        agent: AgentId,
+        at: (i32, i32),
+    },
+    /// The agent ended a step on a hazard cell.
+    OnHazard {
+        agent: AgentId,
+        at: (i32, i32),
+    },
+    /// The agent ended a step on a lure cell.
+    OnLure {
+        agent: AgentId,
+        at: (i32, i32),
+    },
     /// A named reward term contributed `value` to `agent`'s reward this step.
     Reward {
         agent: AgentId,

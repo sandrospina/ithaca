@@ -1,6 +1,7 @@
 //! The Leptos UI: amber terminal shell around the phosphor arena.
 
 use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -15,10 +16,17 @@ use crate::analyse::{AnalyseCtx, analyse_view};
 use crate::campaign::{Answer, AnswerOutcome, Progress, STORAGE_KEY};
 use crate::chart_math::signed;
 use crate::content::{self, LEVELS};
+use crate::lesson_code::{self, LineStep, Reveal, UPDATE};
 use crate::protocol::{
-    BatchReport, GoalDef, Outcome, Pilot, SailedBy, SimRequest, SimResponse, Snapshot,
+    BatchReport, DeployReport, ExperimentResult, GoalDef, LessonMode, LessonState, Outcome, Pilot, QLearningConfig,
+    SailedBy, SavedRaft, SimRequest, SimResponse, Snapshot,
 };
-use crate::render::{self, Effects, Highlights, RenderState};
+use crate::render::{self, Effects, Highlights, Layers, Marks, RenderState, Updated};
+use crate::sim::experiment_spec;
+use crate::store;
+use crate::target::{LocalWorker, TrainingTarget};
+use crate::training_ui::{Draft, TrainCtx, configure_view, deploy_view, train_view};
+use crate::walkthrough::{Play, WalkCtx, walkthrough_view};
 use crate::worker::SimWorker;
 
 /// Pause between agent steps when watching an agent sail, in milliseconds.
@@ -28,11 +36,94 @@ const AUTOPILOT_MS: u64 = 90;
 enum View {
     Arena,
     StyleSheet,
+    Configure,
+    Train,
+    /// The live Q-learning walkthrough: the arena plus the pseudocode.
+    Walkthrough,
     Analyse,
+    Deploy,
 }
 
+/// The side panels below the briefing, which can be folded to a one-line summary.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SidePanel {
+    Loop,
+    QValues,
+    Voyage,
+}
+
+impl SidePanel {
+    const ALL: [SidePanel; 3] = [SidePanel::Loop, SidePanel::QValues, SidePanel::Voyage];
+
+    /// Folded unless the view needs it: the walkthrough shows the RL loop in
+    /// its own code panel, and the panel views have no arena to describe.
+    fn folded_in(self, view: View) -> bool {
+        match view {
+            View::Arena | View::StyleSheet => false,
+            View::Walkthrough => self != SidePanel::QValues,
+            _ => true,
+        }
+    }
+
+    /// Tutorial highlights that live inside this panel and unfold it.
+    fn elements(self) -> &'static [UiElement] {
+        match self {
+            SidePanel::Loop => &[
+                UiElement::State,
+                UiElement::Action,
+                UiElement::Reward,
+                UiElement::Return,
+                UiElement::Step,
+                UiElement::Episode,
+            ],
+            SidePanel::QValues => &[UiElement::QValues],
+            SidePanel::Voyage => &[UiElement::Seed, UiElement::Autopilot, UiElement::Controls],
+        }
+    }
+}
+
+/// A side panel whose body folds away, leaving its title and a one-line summary.
+#[component]
+fn Fold(
+    title: &'static str,
+    #[prop(into)] folded: Signal<bool>,
+    on_toggle: Callback<()>,
+    #[prop(into)] summary: Signal<String>,
+    #[prop(into)] hl: Signal<bool>,
+    children: Children,
+) -> impl IntoView {
+    view! {
+        <section class="panel" class:folded=move || folded.get() class:hl-box=move || hl.get()>
+            <button
+                class="panel-head"
+                aria-expanded=move || (!folded.get()).to_string()
+                title=move || if folded.get() { "Show" } else { "Fold away" }
+                on:click=move |_| on_toggle.run(())
+            >
+                <span class="panel-title">{title}</span>
+                <span class="fold-summary">{move || if folded.get() { summary.get() } else { String::new() }}</span>
+                <span class="fold-mark">{move || if folded.get() { "▸" } else { "▾" }}</span>
+            </button>
+            <div class="panel-body" style:display=move || if folded.get() { "none" } else { "block" }>
+                {children()}
+            </div>
+        </section>
+    }
+}
+
+impl View {
+    /// Views that replace the arena with a panel.
+    fn is_panel(self) -> bool {
+        matches!(self, View::Configure | View::Train | View::Analyse | View::Deploy)
+    }
+}
+
+/// Episodes trained per request while a training run is in progress.
+const TRAIN_CHUNK: u32 = 50;
+
 /// Optional URL parameters, used for debugging and automated screenshots:
-/// `?level=l01_the_raft&seed=3&moves=EESS&step=2&view=stylesheet&plain=1&unlock=all&watch=1&batch=100`.
+/// `?level=l01_the_raft&seed=3&moves=EESS&step=2&view=stylesheet&plain=1&unlock=all&watch=1&batch=100&rewards=lure:5&train=800&deploy=1`.
+/// `view` also accepts `configure`, `train`, `walkthrough`, `analyse` and `deploy`.
 struct UrlParams {
     level: Option<String>,
     seed: Option<u64>,
@@ -43,6 +134,12 @@ struct UrlParams {
     unlock_all: bool,
     watch: bool,
     batch: Option<u32>,
+    /// Reward overrides applied to a new raft on load, e.g. `lure:5,hazard:-30`.
+    rewards: Option<Vec<(String, f32)>>,
+    /// Episodes to train on load.
+    train: Option<u32>,
+    /// Deploy once the training on load finishes.
+    deploy: bool,
 }
 
 impl UrlParams {
@@ -56,6 +153,10 @@ impl UrlParams {
             view: match get("view").as_deref() {
                 Some("stylesheet") => View::StyleSheet,
                 Some("analyse") => View::Analyse,
+                Some("configure") => View::Configure,
+                Some("train") => View::Train,
+                Some("walkthrough") => View::Walkthrough,
+                Some("deploy") => View::Deploy,
                 _ => View::Arena,
             },
             plain: get("plain").as_deref() == Some("1"),
@@ -74,6 +175,16 @@ impl UrlParams {
             unlock_all: get("unlock").as_deref() == Some("all"),
             watch: get("watch").as_deref() == Some("1"),
             batch: get("batch").and_then(|b| b.parse().ok()),
+            rewards: get("rewards").map(|r| {
+                r.split(',')
+                    .filter_map(|kv| {
+                        let (k, v) = kv.split_once(':')?;
+                        Some((k.trim().to_string(), v.trim().parse().ok()?))
+                    })
+                    .collect()
+            }),
+            train: get("train").and_then(|t| t.parse().ok()),
+            deploy: get("deploy").as_deref() == Some("1"),
         }
     }
 }
@@ -127,9 +238,7 @@ fn objective_stats(s: &Snapshot, progress: &Progress) -> String {
     };
     match (&objective.goal, objective.best_route) {
         (GoalDef::BestReturn, Some(best)) => {
-            let mine = progress
-                .best(&s.level_id)
-                .map_or("—".into(), |b| signed(f64::from(b)));
+            let mine = progress.best(&s.level_id).map_or("—".into(), |b| signed(f64::from(b)));
             format!(
                 "best possible {} in {} moves · this voyage {} after {} moves · your best {mine}",
                 signed(f64::from(best.episode_return)),
@@ -140,16 +249,10 @@ fn objective_stats(s: &Snapshot, progress: &Progress) -> String {
         }
         _ => {
             let mut parts = Vec::new();
-            if let Some(prev) = level_index(&s.level_id)
-                .and_then(|i| i.checked_sub(1))
-                .map(|i| &LEVELS[i])
+            if let Some(prev) = level_index(&s.level_id).and_then(|i| i.checked_sub(1)).map(|i| &LEVELS[i])
                 && let Some(best) = progress.best(prev.id)
             {
-                parts.push(format!(
-                    "your best by hand in {}: {}",
-                    prev.menu_label,
-                    signed(f64::from(best))
-                ));
+                parts.push(format!("your best by hand in {}: {}", prev.menu_label, signed(f64::from(best))));
             }
             if let Some(b) = s.random_baseline {
                 parts.push(format!(
@@ -163,6 +266,27 @@ fn objective_stats(s: &Snapshot, progress: &Progress) -> String {
         }
     }
 }
+
+/// The settings a guided experiment pins, in one line.
+fn experiment_settings(def: &rl_tutorial::ExperimentDef) -> String {
+    let spec = experiment_spec(def);
+    let c = spec.config;
+    let mut parts = vec![format!("α {} · γ {} · ε {}", c.alpha, c.gamma, c.epsilon)];
+    parts.extend(spec.rewards.iter().map(|(k, v)| format!("{k} {}", signed(f64::from(*v)))));
+    parts.push(format!("{} episodes · training seed {}", spec.episodes, spec.training_seed));
+    parts.join(" · ")
+}
+
+fn experiment_summary(r: &ExperimentResult) -> String {
+    let mut s = format!("{} of {} test voyages reached the shore", r.reached, r.tested);
+    if let Some(shortest) = r.shortest {
+        s.push_str(&format!(" · {shortest} took the shortest route"));
+    }
+    s.push_str(&format!(" · {:.1} moves on average", r.mean_length));
+    s
+}
+
+const COMPASS: [(&str, &str); 4] = [("N", "north"), ("E", "east"), ("S", "south"), ("W", "west")];
 
 #[component]
 pub fn App() -> impl IntoView {
@@ -185,8 +309,7 @@ pub fn App() -> impl IntoView {
     let batch_running = RwSignal::new(false);
     let batch_size = RwSignal::new(100u32);
     let batch_first_seed = RwSignal::new(1u64);
-    let feedback =
-        RwSignal::new(std::collections::BTreeMap::<(usize, usize), AnswerOutcome>::new());
+    let feedback = RwSignal::new(std::collections::BTreeMap::<(usize, usize), AnswerOutcome>::new());
     let error = RwSignal::new(None::<String>);
     let seed = RwSignal::new(params.seed.unwrap_or(1));
     let view = RwSignal::new(params.view);
@@ -197,13 +320,126 @@ pub fn App() -> impl IntoView {
     let pending_step = StoredValue::new(params.tutorial_step);
     let pending_watch = StoredValue::new(params.watch);
     let pending_batch = StoredValue::new(params.batch);
+    let pending_rewards = StoredValue::new(params.rewards);
+    let pending_train = StoredValue::new(params.train);
+    let pending_deploy = StoredValue::new(params.deploy);
+    let first_load = StoredValue::new(true);
+
+    // ---- training state
+    let draft = RwSignal::new(None::<Draft>);
+    let sync_draft = StoredValue::new(true);
+    let training = RwSignal::new(false);
+    let deploy_report = RwSignal::new(None::<DeployReport>);
+    let show_policy = RwSignal::new(true);
+    let selected_cell = RwSignal::new(None::<(i32, i32)>);
+
+    // ---- walkthrough state
+    let lesson_line = RwSignal::new(0usize);
+    let lesson_reveal = StoredValue::new(None::<Reveal>);
+    let lesson_play = RwSignal::new(None::<Play>);
+    let updated_mark = StoredValue::new(None::<Updated>);
+    let flashed = StoredValue::new(None::<(u32, u32)>);
+
+    // ---- tutorial predictions and guided experiments, by step index
+    let predictions = RwSignal::new(BTreeMap::<usize, usize>::new());
+    let experiments = RwSignal::new(BTreeMap::<usize, ExperimentResult>::new());
+    let experiment_running = RwSignal::new(None::<usize>);
+
+    // ---- saved rafts
+    let saved_key = StoredValue::new(None::<String>);
 
     // ---- simulation worker
+    // The worker's callback must send follow-up requests (the next training
+    // chunk), but the bridge does not exist yet when the callback is built:
+    // it reaches the bridge through this slot, filled right after spawning.
+    let bridge_slot = StoredValue::new_local(None::<gloo_worker::WorkerBridge<SimWorker>>);
+    let bridge_send = move |request: SimRequest| {
+        bridge_slot.with_value(|b| {
+            if let Some(b) = b {
+                b.send(request)
+            }
+        })
+    };
+    // Training runs on a target: this browser's worker for now.
+    let target =
+        StoredValue::new_local(Rc::new(LocalWorker::new(TRAIN_CHUNK, Rc::new(bridge_send))) as Rc<dyn TrainingTarget>);
+    let target_label = target.with_value(|t| t.label());
     let bridge = SimWorker::spawner()
         .callback(move |response| match response {
             SimResponse::Snapshot(s) => {
                 error.set(None);
                 snapshot.set(Some(*s));
+            }
+            SimResponse::Trained(s) => {
+                error.set(None);
+                snapshot.set(Some(*s));
+                let more = training.get_untracked() && !target.with_value(|t| t.chunk_done());
+                if !more {
+                    training.set(false);
+                    if pending_deploy.try_update_value(std::mem::take).unwrap_or(false) {
+                        bridge_send(SimRequest::Deploy);
+                    }
+                }
+            }
+            SimResponse::Lesson(s) => {
+                error.set(None);
+                let s = *s;
+                if let (Some(reveal), Some(l)) = (lesson_reveal.try_update_value(Option::take).flatten(), &s.lesson) {
+                    lesson_line.set(lesson_code::line_after(reveal, l));
+                }
+                let finished = s.lesson.as_ref().is_some_and(|l| l.finished.is_some());
+                snapshot.set(Some(s));
+                if let Some(play) = lesson_play.get_untracked() {
+                    if play == Play::Watch && finished {
+                        lesson_play.set(None);
+                    } else {
+                        set_timeout(
+                            move || {
+                                if lesson_play.get_untracked() == Some(play)
+                                    && lesson_reveal.with_value(Option::is_none)
+                                {
+                                    let (mode, reveal) = play.request();
+                                    lesson_reveal.set_value(Some(reveal));
+                                    bridge_send(SimRequest::Lesson { mode });
+                                }
+                            },
+                            Duration::from_millis(play.delay_ms()),
+                        );
+                    }
+                }
+            }
+            SimResponse::Experiment { result, snapshot: s } => {
+                error.set(None);
+                if let Some(step) = experiment_running.get_untracked() {
+                    experiments.update(|e| {
+                        e.insert(step, result);
+                    });
+                }
+                experiment_running.set(None);
+                sync_draft.set_value(true);
+                deploy_report.set(None);
+                snapshot.set(Some(*s));
+                show_policy.set(true);
+                view.set(View::Arena);
+            }
+            SimResponse::Export(save) => {
+                if let Ok(json) = serde_json::to_string(&*save) {
+                    leptos::task::spawn_local(async move { store::save(&save.level_id, &json).await });
+                }
+            }
+            SimResponse::Deploy(r) => {
+                let r = *r;
+                let newly = snapshot.with_untracked(|s| {
+                    let s = s.as_ref()?;
+                    let goal = &s.objective.as_ref()?.goal;
+                    let mut newly = false;
+                    progress.update(|p| newly = p.record_deploy(&s.level_id, goal, &r));
+                    Some(newly)
+                });
+                if newly == Some(true) {
+                    just_completed.set(true);
+                }
+                deploy_report.set(Some(r));
             }
             SimResponse::Batch(r) => {
                 batch_running.set(false);
@@ -222,18 +458,24 @@ pub fn App() -> impl IntoView {
             }
             SimResponse::Error(e) => {
                 batch_running.set(false);
+                training.set(false);
+                target.with_value(|t| t.cancel());
+                lesson_play.set(None);
+                lesson_reveal.set_value(None);
+                experiment_running.set(None);
                 error.set(Some(e));
             }
         })
         // Trunk builds the worker as a classic (non-module) script.
         .as_module(false)
         .spawn("./worker.js");
-    let bridge = StoredValue::new_local(bridge);
-    let send = move |request: SimRequest| bridge.with_value(|b| b.send(request));
+    bridge_slot.set_value(Some(bridge));
+    let send = bridge_send;
 
     // ---- autopilot: an agent sails while the player watches
     let autopilot = StoredValue::new_local(None::<IntervalHandle>);
     let autopilot_on = RwSignal::new(false);
+    let autopilot_trained = RwSignal::new(false);
     let stop_autopilot = move || {
         autopilot.update_value(|h| {
             if let Some(h) = h.take() {
@@ -242,13 +484,12 @@ pub fn App() -> impl IntoView {
         });
         autopilot_on.set(false);
     };
-    let start_autopilot = move || {
+    let start_autopilot = move |trained: bool| {
         stop_autopilot();
-        send(SimRequest::Reset {
-            seed: seed.get_untracked(),
-        });
+        send(SimRequest::Reset { seed: seed.get_untracked() });
+        autopilot_trained.set(trained);
         if let Ok(h) = set_interval_with_handle(
-            move || send(SimRequest::AgentStep),
+            move || send(SimRequest::AgentStep { trained }),
             Duration::from_millis(AUTOPILOT_MS),
         ) {
             autopilot.set_value(Some(h));
@@ -257,17 +498,11 @@ pub fn App() -> impl IntoView {
     };
 
     // ---- tutorial
-    let tutorial = Memo::new(move |_| {
-        content::level(&level_id.get()).and_then(|e| TutorialDef::parse(e.tutorial_source).ok())
-    });
+    let tutorial =
+        Memo::new(move |_| content::level(&level_id.get()).and_then(|e| TutorialDef::parse(e.tutorial_source).ok()));
     let highlights = Memo::new(move |_| {
         let i = tutorial_index.get();
-        tutorial.with(|t| {
-            t.as_ref()
-                .and_then(|t| t.steps.get(i))
-                .map(|StepDef::Say { highlight, .. }| highlight.clone())
-                .unwrap_or_default()
-        })
+        tutorial.with(|t| t.as_ref().and_then(|t| t.steps.get(i)).map(|s| s.highlight().to_vec()).unwrap_or_default())
     });
     let is_hl = move |el: UiElement| highlights.with(|h| h.contains(&el));
     let step_count = move || tutorial.with(|t| t.as_ref().map_or(0, |t| t.steps.len()));
@@ -275,19 +510,135 @@ pub fn App() -> impl IntoView {
         let i = tutorial_index.get();
         let d = depth.get();
         tutorial.with(|t| {
-            t.as_ref().and_then(|t| t.steps.get(i)).map(
-                |StepDef::Say {
-                     beat, title, text, ..
-                 }| {
-                    (
-                        beat.label().to_string(),
-                        title.clone(),
-                        text.at(d).to_string(),
-                    )
-                },
-            )
+            t.as_ref()
+                .and_then(|t| t.steps.get(i))
+                .map(|s| (s.beat().label().to_string(), s.title().to_string(), s.text().at(d).to_string()))
         })
     };
+
+    // ---- walkthrough: Q-learning one line, one move or one episode at a time
+    // One request at a time: input while an answer is pending is ignored, so
+    // fast key presses cannot skip ahead of what the panel shows.
+    let lesson_request = move |mode: LessonMode, reveal: Reveal| {
+        if lesson_reveal.with_value(Option::is_some) {
+            return;
+        }
+        lesson_reveal.set_value(Some(reveal));
+        send(SimRequest::Lesson { mode });
+    };
+    let current_lesson = move || snapshot.with_untracked(|s| s.as_ref().and_then(|s| s.lesson.clone()));
+    let step_line = move || {
+        lesson_play.set(None);
+        if lesson_reveal.with_value(Option::is_some) {
+            return;
+        }
+        match lesson_code::step_line(current_lesson().as_ref(), lesson_line.get_untracked()) {
+            LineStep::Show(line) => lesson_line.set(line),
+            LineStep::Request(mode, reveal) => lesson_request(mode, reveal),
+        }
+    };
+    let step_move = move || {
+        lesson_play.set(None);
+        lesson_request(LessonMode::Move, Reveal::Move);
+    };
+    let open_walkthrough = move || {
+        stop_autopilot();
+        view.set(View::Walkthrough);
+        if current_lesson().is_none() {
+            lesson_request(LessonMode::Start, Reveal::Start);
+        }
+    };
+    let walk_ctx = WalkCtx {
+        snapshot,
+        depth,
+        line: lesson_line,
+        play: lesson_play,
+        highlights,
+        step_line: Callback::new(move |()| step_line()),
+        step_move: Callback::new(move |()| step_move()),
+        finish_episode: Callback::new(move |()| {
+            lesson_play.set(None);
+            lesson_request(LessonMode::Episode, Reveal::Episode);
+        }),
+        set_play: Callback::new(move |p: Option<Play>| {
+            lesson_play.set(p);
+            if let Some(p) = p {
+                let (mode, reveal) = p.request();
+                lesson_request(mode, reveal);
+            }
+        }),
+        back: Callback::new(move |()| {
+            lesson_play.set(None);
+            view.set(View::Train);
+        }),
+    };
+    Effect::new(move |_| {
+        if view.get() != View::Walkthrough {
+            lesson_play.set(None);
+        }
+    });
+    // The Q-value just updated flashes on the map once its line is reached.
+    Effect::new(move |_| {
+        let line = lesson_line.get();
+        snapshot.with(|s| {
+            let Some(l) = s.as_ref().and_then(|s| s.lesson.as_ref()) else { return };
+            let Some(m) = &l.last else { return };
+            let key = (l.episode, l.moves);
+            if line >= UPDATE && flashed.get_value() != Some(key) {
+                flashed.set_value(Some(key));
+                updated_mark.set_value(Some(Updated { cell: m.from, action: m.trace.action, born: now_ms() }));
+            }
+        });
+    });
+    // What the arena shows during the walkthrough, given the current line.
+    let lesson_model = Memo::new(move |_| {
+        let line = lesson_line.get();
+        snapshot.with(|s| {
+            s.as_ref()
+                .and_then(|s| s.lesson.as_ref())
+                .map(|l| (lesson_code::displayed_model(l, line), l.last.is_none()))
+        })
+    });
+    let lesson_render_state = StoredValue::new_local(RenderState::default());
+    Effect::new(move |_| {
+        lesson_model.with(|m| {
+            if let Some((model, fresh)) = m {
+                lesson_render_state.update_value(|rs| rs.on_snapshot(model, now_ms(), *fresh));
+            }
+        })
+    });
+    // The Q-table as shown: during the walkthrough, as of the current line.
+    let shown_policy = Memo::new(move |_| {
+        let v = view.get();
+        let line = lesson_line.get();
+        snapshot.with(|s| {
+            let s = s.as_ref()?;
+            let t = s.training.as_ref()?;
+            if t.policy.is_empty() {
+                return None;
+            }
+            Some(match (v, &s.lesson) {
+                (View::Walkthrough, Some(l)) => lesson_code::displayed_policy(&t.policy, l, line),
+                _ => t.policy.clone(),
+            })
+        })
+    });
+    // The cell whose Q-values the inspector shows: the selected one, or the raft's.
+    let inspected = Memo::new(move |_| {
+        let selected = selected_cell.get();
+        let cell = selected.or_else(|| {
+            snapshot.with(|s| {
+                let s = s.as_ref()?;
+                match (view.get(), &s.lesson) {
+                    (View::Walkthrough, Some(l)) => Some(
+                        l.last.as_ref().filter(|_| lesson_line.get() < lesson_code::ADVANCE).map_or(l.cell, |m| m.from),
+                    ),
+                    _ => Some(s.position),
+                }
+            })
+        })?;
+        shown_policy.with(|p| p.as_ref()?.iter().find(|c| c.cell == cell).copied()).map(|c| (c, selected.is_some()))
+    });
 
     // ---- level loading
     Effect::new(move |_| {
@@ -296,46 +647,82 @@ pub fn App() -> impl IntoView {
         just_completed.set(false);
         report.set(None);
         feedback.set(Default::default());
-        view.update(|v| {
-            if *v == View::Analyse && pending_batch.with_value(Option::is_none) {
-                *v = View::Arena;
-            }
-        });
-        tutorial_index.set(
-            pending_step
-                .try_update_value(|s| s.take())
-                .flatten()
-                .unwrap_or(0),
-        );
-        send(SimRequest::Load {
-            level_id: id,
-            seed: seed.get_untracked(),
-        });
-        for action in pending_moves
-            .try_update_value(|m| m.take())
-            .flatten()
-            .unwrap_or_default()
-        {
+        training.set(false);
+        target.with_value(|t| t.cancel());
+        deploy_report.set(None);
+        sync_draft.set_value(true);
+        selected_cell.set(None);
+        lesson_play.set(None);
+        lesson_line.set(0);
+        predictions.set(Default::default());
+        experiments.set(Default::default());
+        experiment_running.set(None);
+        saved_key.set_value(None);
+        // The first load keeps the view from the URL; later level changes return to the arena.
+        if !first_load.try_update_value(std::mem::take).unwrap_or(false) {
+            view.update(|v| {
+                if v.is_panel() {
+                    *v = View::Arena;
+                }
+            });
+        }
+        tutorial_index.set(pending_step.try_update_value(|s| s.take()).flatten().unwrap_or(0));
+        send(SimRequest::Load { level_id: id.clone(), seed: seed.get_untracked() });
+        let scripted = pending_rewards.with_value(Option::is_some) || pending_train.with_value(Option::is_some);
+        if !scripted {
+            // Bring back the raft saved for this level, if any.
+            leptos::task::spawn_local(async move {
+                let Some(json) = store::load(&id).await else { return };
+                let Ok(save) = serde_json::from_str::<SavedRaft>(&json) else { return };
+                if level_id.get_untracked() == id {
+                    sync_draft.set_value(true);
+                    send(SimRequest::Restore(Box::new(save)));
+                }
+            });
+        }
+        if view.get_untracked() == View::Walkthrough {
+            lesson_reveal.set_value(Some(Reveal::Start));
+            send(SimRequest::Lesson { mode: LessonMode::Start });
+        }
+        for action in pending_moves.try_update_value(|m| m.take()).flatten().unwrap_or_default() {
             send(SimRequest::Step { action });
         }
-        if pending_watch
-            .try_update_value(std::mem::take)
-            .unwrap_or(false)
-        {
-            start_autopilot();
+        if pending_watch.try_update_value(std::mem::take).unwrap_or(false) {
+            start_autopilot(false);
+        }
+        if let Some(rewards) = pending_rewards.try_update_value(Option::take).flatten() {
+            send(SimRequest::Configure { config: QLearningConfig::default(), rewards, training_seed: 1 });
+        }
+        if let Some(episodes) = pending_train.try_update_value(Option::take).flatten() {
+            training.set(true);
+            target.with_value(|t| t.start(episodes));
         }
         if let Some(episodes) = pending_batch.try_update_value(Option::take).flatten() {
             batch_size.set(episodes);
             batch_running.set(true);
-            send(SimRequest::Batch {
-                first_seed: batch_first_seed.get_untracked(),
-                episodes,
-            });
+            send(SimRequest::Batch { first_seed: batch_first_seed.get_untracked(), episodes });
         }
     });
 
     // ---- campaign progress
     Effect::new(move |_| progress.with(save_progress));
+    // A trained raft is saved after every finished training run or walkthrough episode.
+    Effect::new(move |_| {
+        let busy = training.get();
+        snapshot.with(|s| {
+            let Some(s) = s.as_ref() else { return };
+            let Some(t) = s.training.as_ref() else { return };
+            if busy || t.episodes_trained == 0 {
+                return;
+            }
+            let key =
+                format!("{}|{}|{}|{:?}|{:?}", s.level_id, t.episodes_trained, t.training_seed, t.config, t.rewards);
+            if saved_key.get_value().as_deref() != Some(key.as_str()) {
+                saved_key.set_value(Some(key));
+                send(SimRequest::Export);
+            }
+        })
+    });
     let recorded = StoredValue::new(None::<(String, u32)>);
     Effect::new(move |_| {
         let Some(s) = snapshot.get() else { return };
@@ -366,10 +753,8 @@ pub fn App() -> impl IntoView {
     // A completed level opens its debrief.
     Effect::new(move |_| {
         if just_completed.get() {
-            let debrief = tutorial.with_untracked(|t| {
-                t.as_ref()
-                    .and_then(|t| t.steps.iter().position(|s| s.beat() == Beat::Debrief))
-            });
+            let debrief = tutorial
+                .with_untracked(|t| t.as_ref().and_then(|t| t.steps.iter().position(|s| s.beat() == Beat::Debrief)));
             if let Some(i) = debrief {
                 tutorial_index.set(i);
             }
@@ -396,20 +781,17 @@ pub fn App() -> impl IntoView {
         replay_best: Callback::new(move |best_seed: u64| {
             seed.set(best_seed);
             view.set(View::Arena);
-            start_autopilot();
+            start_autopilot(false);
         }),
         submit_answer: Callback::new(move |(task, question, answer): (usize, usize, Answer)| {
             let Some((level, goal)) = snapshot.with_untracked(|s| {
-                s.as_ref()
-                    .and_then(|s| Some((s.level_id.clone(), s.objective.as_ref()?.goal.clone())))
+                s.as_ref().and_then(|s| Some((s.level_id.clone(), s.objective.as_ref()?.goal.clone())))
             }) else {
                 return;
             };
             let mut result = (AnswerOutcome::Incorrect, false);
             report.with_untracked(|r| {
-                progress.update(|p| {
-                    result = p.answer(&level, &goal, (task, question), answer, r.as_ref())
-                });
+                progress.update(|p| result = p.answer(&level, &goal, (task, question), answer, r.as_ref()));
             });
             feedback.update(|f| {
                 f.insert((task, question), result.0);
@@ -419,6 +801,55 @@ pub fn App() -> impl IntoView {
             }
         }),
     };
+    // ---- training: settings draft, training runs, deployment
+    Effect::new(move |_| {
+        snapshot.with(|s| {
+            if let Some(t) = s.as_ref().and_then(|s| s.training.as_ref())
+                && sync_draft.get_value()
+            {
+                draft.set(Some(Draft::from_status(t)));
+                sync_draft.set_value(false);
+            }
+        })
+    });
+    let train_ctx = TrainCtx {
+        snapshot,
+        progress,
+        highlights,
+        draft,
+        training,
+        deploy: deploy_report,
+        apply: Callback::new(move |()| {
+            let Some(d) = draft.get_untracked() else { return };
+            stop_autopilot();
+            training.set(false);
+            target.with_value(|t| t.cancel());
+            lesson_play.set(None);
+            let id = level_id.get_untracked();
+            leptos::task::spawn_local(async move { store::forget(&id).await });
+            deploy_report.set(None);
+            sync_draft.set_value(true);
+            send(SimRequest::Configure { config: d.config, rewards: d.rewards, training_seed: d.training_seed });
+        }),
+        train: Callback::new(move |episodes: u32| {
+            training.set(true);
+            target.with_value(|t| t.start(episodes));
+        }),
+        stop_training: Callback::new(move |()| {
+            target.with_value(|t| t.cancel());
+            training.set(false);
+        }),
+        open_walkthrough: Callback::new(move |()| open_walkthrough()),
+        deploy_now: Callback::new(move |()| send(SimRequest::Deploy)),
+        watch_trained: Callback::new(move |first_seed: u64| {
+            seed.set(first_seed);
+            view.set(View::Arena);
+            start_autopilot(true);
+        }),
+    };
+    let trained =
+        move || snapshot.with(|s| s.as_ref().and_then(|s| s.training.as_ref()).is_some_and(|t| t.episodes_trained > 0));
+
     let task_states = move || {
         snapshot.with(|s| {
             s.as_ref()
@@ -430,21 +861,78 @@ pub fn App() -> impl IntoView {
         })
     };
     let level_complete = move || progress.with(|p| p.is_complete(&level_id.get()));
-    let next_level = move || {
-        level_index(&level_id.get())
-            .map(|i| i + 1)
-            .filter(|&i| i < LEVELS.len())
-    };
+    let next_level = move || level_index(&level_id.get()).map(|i| i + 1).filter(|&i| i < LEVELS.len());
     let pilot = move || snapshot.with(|s| s.as_ref().map(|s| s.pilot));
+
+    // ---- decluttering: the objective opens on demand, side panels fold
+    let objective_open = RwSignal::new(false);
+    Effect::new(move |_| {
+        if just_completed.get() || is_hl(UiElement::Objective) {
+            objective_open.set(true);
+        }
+    });
+    let open_level = move |i: usize| {
+        let id = LEVELS[i].id;
+        if level_id.get_untracked() == id {
+            objective_open.update(|o| *o = !*o);
+        } else {
+            level_id.set(id.to_string());
+            objective_open.set(true);
+        }
+    };
+    // The player's own fold choices, until the view changes. A tutorial
+    // highlight inside a panel unfolds it.
+    let fold_choice = RwSignal::new([None::<bool>; 3]);
+    Effect::new(move |prev: Option<View>| {
+        let v = view.get();
+        highlights.with(|h| {
+            fold_choice.update(|c| {
+                if prev != Some(v) {
+                    *c = [None; 3];
+                }
+                for p in SidePanel::ALL {
+                    if p.elements().iter().any(|e| h.contains(e)) {
+                        c[p as usize] = Some(false);
+                    }
+                }
+            });
+        });
+        v
+    });
+    let folded = move |p: SidePanel| {
+        Signal::derive(move || fold_choice.with(|c| c[p as usize]).unwrap_or_else(|| p.folded_in(view.get())))
+    };
+    let toggle_fold = move |p: SidePanel| {
+        Callback::new(move |()| {
+            let now = folded(p).get_untracked();
+            fold_choice.update(|c| c[p as usize] = Some(!now));
+        })
+    };
 
     // ---- keyboard
     let _keys = window_event_listener(ev::keydown, move |e: web_sys::KeyboardEvent| {
-        if let Some(el) = e
-            .target()
-            .and_then(|t| t.dyn_into::<web_sys::Element>().ok())
-            && matches!(el.tag_name().as_str(), "INPUT" | "SELECT" | "TEXTAREA")
-        {
+        let tag = e.target().and_then(|t| t.dyn_into::<web_sys::Element>().ok()).map(|el| el.tag_name());
+        if matches!(tag.as_deref(), Some("INPUT" | "SELECT" | "TEXTAREA")) {
             return;
+        }
+        if e.key() == "Escape" && objective_open.get_untracked() {
+            objective_open.set(false);
+            return;
+        }
+        if view.get_untracked() == View::Walkthrough && tag.as_deref() != Some("BUTTON") {
+            match e.key().as_str() {
+                " " => {
+                    e.prevent_default();
+                    step_line();
+                    return;
+                }
+                "Enter" => {
+                    e.prevent_default();
+                    step_move();
+                    return;
+                }
+                _ => {}
+            }
         }
         let action = match e.key().as_str() {
             "ArrowUp" | "w" | "W" => Some(0),
@@ -461,9 +949,7 @@ pub fn App() -> impl IntoView {
         match e.key().as_str() {
             "r" | "R" => {
                 stop_autopilot();
-                send(SimRequest::Reset {
-                    seed: seed.get_untracked(),
-                });
+                send(SimRequest::Reset { seed: seed.get_untracked() });
             }
             "n" | "N" => {
                 stop_autopilot();
@@ -507,20 +993,46 @@ pub fn App() -> impl IntoView {
             return;
         };
         animation_loop(move |now| {
-            let fx = Effects {
-                plain: plain.get_untracked(),
-            };
+            let fx = Effects { plain: plain.get_untracked() };
+            let hl = highlights.with_untracked(|h| Highlights {
+                agent: h.contains(&UiElement::Agent),
+                goal: h.contains(&UiElement::Goal),
+            });
             match view.get_untracked() {
                 View::StyleSheet => render::draw_style_sheet(&ctx, now, fx),
-                View::Analyse => {}
+                View::Configure | View::Train | View::Analyse | View::Deploy => {}
+                View::Walkthrough => lesson_model.with_untracked(|m| {
+                    if let Some((model, _)) = m {
+                        let policy = shown_policy.get_untracked();
+                        let marks =
+                            Marks { selected: selected_cell.get_untracked(), updated: updated_mark.get_value() };
+                        lesson_render_state.update_value(|rs| {
+                            render::draw_world(
+                                &ctx,
+                                model,
+                                rs,
+                                now,
+                                fx,
+                                Layers { hl, policy: policy.as_deref(), marks },
+                            )
+                        });
+                    }
+                }),
                 View::Arena => snapshot.with_untracked(|s| {
                     if let Some(s) = s {
-                        let hl = highlights.with_untracked(|h| Highlights {
-                            agent: h.contains(&UiElement::Agent),
-                            goal: h.contains(&UiElement::Goal),
-                        });
+                        let trained = s.training.as_ref().is_some_and(|t| t.episodes_trained > 0);
+                        let policy =
+                            (trained && show_policy.get_untracked()).then(|| shown_policy.get_untracked()).flatten();
+                        let marks = Marks { selected: selected_cell.get_untracked(), updated: None };
                         render_state.update_value(|rs| {
-                            render::draw_world(&ctx, &s.render, rs, now, hl, fx)
+                            render::draw_world(
+                                &ctx,
+                                &s.render,
+                                rs,
+                                now,
+                                fx,
+                                Layers { hl, policy: policy.as_deref(), marks },
+                            )
                         });
                     }
                 }),
@@ -536,8 +1048,150 @@ pub fn App() -> impl IntoView {
     });
 
     // ---- view helpers
-    let snap_text = move |f: fn(&Snapshot) -> String| {
-        move || snapshot.with(|s| s.as_ref().map_or("—".into(), f))
+    // During the walkthrough the RL loop panel follows the walkthrough episode,
+    // as of the highlighted line.
+    let hud = move |arena: fn(&Snapshot) -> String, lesson: fn(&LessonState, usize) -> String| {
+        move || {
+            let walking = view.get() == View::Walkthrough;
+            let line = lesson_line.get();
+            snapshot.with(|s| {
+                let Some(s) = s.as_ref() else { return "—".to_string() };
+                match (&s.lesson, walking) {
+                    (Some(l), true) => lesson(l, line),
+                    _ => arena(s),
+                }
+            })
+        }
+    };
+
+    // A tutorial step's prediction and guided experiment, if it has them.
+    let step_extra = move |i: usize| {
+        let step = tutorial.with_untracked(|t| t.as_ref().and_then(|t| t.steps.get(i).cloned()))?;
+        let def = step.experiment()?.clone();
+        let settings = experiment_settings(&def);
+        let spec = StoredValue::new(experiment_spec(&def));
+        let prediction = match &step {
+            StepDef::Predict { question, options, answer, explain, .. } => {
+                Some((question.clone(), options.clone(), *answer, explain.clone()))
+            }
+            _ => None,
+        };
+        let needs_choice = prediction.is_some();
+        let chosen = move || predictions.with(|p| p.get(&i).copied());
+        let result = move || experiments.with(|e| e.get(&i).copied());
+        let run = move |_| {
+            stop_autopilot();
+            training.set(false);
+            target.with_value(|t| t.cancel());
+            lesson_play.set(None);
+            experiment_running.set(Some(i));
+            send(SimRequest::Experiment(spec.get_value()));
+        };
+        let prediction_view = prediction.map(|(question, options, answer, explain)| {
+            let right = StoredValue::new(options[answer].clone());
+            let explain = StoredValue::new(explain);
+            view! {
+                <p class="predict-question">{question}</p>
+                <div class="predict-options">
+                    {options
+                        .into_iter()
+                        .enumerate()
+                        .map(|(k, o)| {
+                            view! {
+                                <button
+                                    class="option"
+                                    class:chosen=move || chosen() == Some(k)
+                                    disabled=move || chosen().is_some()
+                                    on:click=move |_| predictions.update(|p| {
+                                        p.insert(i, k);
+                                    })
+                                >
+                                    {o}
+                                </button>
+                            }
+                        })
+                        .collect_view()}
+                </div>
+                {move || {
+                    result()
+                        .zip(chosen())
+                        .map(|(_, c)| {
+                            view! {
+                                <p class="verdict" class:right=c == answer>
+                                    {if c == answer {
+                                        "✓ Your prediction was right.".to_string()
+                                    } else {
+                                        format!("✗ Not this time. The answer: {}", right.get_value())
+                                    }}
+                                </p>
+                                <p class="explain">{explain.get_value()}</p>
+                            }
+                        })
+                }}
+            }
+        });
+        Some(view! {
+            <div class="experiment">
+                {prediction_view}
+                <p class="experiment-settings">{settings}</p>
+                <div class="row">
+                    <button
+                        class="primary"
+                        disabled=move || {
+                            pilot() != Some(Pilot::Agent) || experiment_running.get().is_some()
+                                || (needs_choice && chosen().is_none())
+                        }
+                        title=move || if needs_choice && chosen().is_none() { "Pick a prediction first" } else { "" }
+                        on:click=run
+                    >
+                        {move || {
+                            if experiment_running.get() == Some(i) {
+                                "RUNNING…"
+                            } else if result().is_some() {
+                                "RUN AGAIN"
+                            } else {
+                                "RUN THE EXPERIMENT"
+                            }
+                        }}
+                    </button>
+                </div>
+                <p class="subtitle">"Starts a new raft with these settings, replacing the current one."</p>
+                {move || result().map(|r| view! { <p class="result glow">{experiment_summary(&r)}</p> })}
+            </div>
+        })
+    };
+
+    // The inspector: the four Q-values of one cell, laid out as a compass.
+    let q_inspector = move || {
+        inspected.get().map(|(c, selected)| {
+            let best = c.values.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+            let low = c.values.iter().copied().fold(f32::INFINITY, f32::min);
+            let preference = best - low > 1e-6;
+            let best_i = c.values.iter().position(|&v| v == best).unwrap_or(0);
+            let entry = move |k: usize| {
+                let (short, _) = COMPASS[k];
+                let is_best = preference && c.values[k] >= best - 1e-6;
+                view! {
+                    <span class=format!("compass-{}", short.to_lowercase()) class:best=is_best>
+                        {format!("{short} {}", lesson_code::num(c.values[k]))}
+                    </span>
+                }
+            };
+            let (whose, hint) =
+                if selected { ("cell", "click again to follow the raft") } else { ("raft at", "click a cell") };
+            view! {
+                <p class="subtitle">{format!("{whose} {} · {hint}", lesson_code::cell(c.cell))}</p>
+                <div class="compass">
+                    {entry(0)}
+                    {entry(3)}
+                    <span class="compass-c">
+                        {if preference { format!("best: {}", COMPASS[best_i].1) } else { "no preference yet".into() }}
+                    </span>
+                    {entry(1)}
+                    {entry(2)}
+                </div>
+            }
+        })
     };
 
     view! {
@@ -548,12 +1202,6 @@ pub fn App() -> impl IntoView {
                 <span style="flex: 1"></span>
                 <button class:active=move || view.get() == View::Arena on:click=move |_| view.set(View::Arena)>
                     "ARENA"
-                </button>
-                <button
-                    class:active=move || view.get() == View::StyleSheet
-                    on:click=move |_| view.set(View::StyleSheet)
-                >
-                    "STYLE SHEET"
                 </button>
                 <button class:active=move || plain.get() on:click=move |_| plain.update(|p| *p = !*p)>
                     "PLAIN MODE"
@@ -575,7 +1223,8 @@ pub fn App() -> impl IntoView {
                                 class:done=done
                                 disabled=move || !can_open(i)
                                 title=move || if can_open(i) { "" } else { "Complete the previous level to unlock" }
-                                on:click=move |_| level_id.set(l.id.to_string())
+                                aria-expanded=move || (level_id.get() == l.id && objective_open.get()).to_string()
+                                on:click=move |_| open_level(i)
                             >
                                 {move || if done() { "✓ " } else if can_open(i) { "○ " } else { "■ " }}
                                 {l.menu_label}
@@ -585,90 +1234,170 @@ pub fn App() -> impl IntoView {
                     .collect_view()}
                 <span class="route">"━━ ┄ ┄ ┄"</span>
                 <span class="port far">"ITHACA"</span>
-            </nav>
-
-            <section class="objective" class:hl-box=move || is_hl(UiElement::Objective)>
-                <span class="objective-label">"OBJECTIVE"</span>
-                <span class="objective-text">
+                <span style="flex: 1"></span>
+                <button
+                    class="objective-chip"
+                    class:done=level_complete
+                    class:active=move || objective_open.get()
+                    class:hl-box=move || is_hl(UiElement::Objective)
+                    aria-expanded=move || objective_open.get().to_string()
+                    title="The level's objective and tasks"
+                    on:click=move |_| objective_open.update(|o| *o = !*o)
+                >
                     {move || {
-                        snapshot
-                            .with(|s| s.as_ref().and_then(|s| s.objective.as_ref().map(|o| o.text.clone())))
-                            .unwrap_or_default()
+                        let tasks = task_states();
+                        let done = tasks.iter().filter(|t| t.done).count();
+                        let mark = if objective_open.get() { "▴" } else { "▾" };
+                        if level_complete() {
+                            format!("✓ LEVEL COMPLETE {mark}")
+                        } else if tasks.is_empty() {
+                            format!("OBJECTIVE {mark}")
+                        } else {
+                            format!("OBJECTIVE {done}/{} {mark}", tasks.len())
+                        }
                     }}
-                </span>
-                <span class="objective-stats">
-                    {move || {
-                        snapshot.with(|s| s.as_ref().map(|s| progress.with(|p| objective_stats(s, p)))).unwrap_or_default()
-                    }}
-                </span>
-                <span class="tasks">
-                    {move || {
-                        task_states()
-                            .into_iter()
-                            .map(|t| {
-                                let glyph = if t.done { "✓" } else if t.available { "○" } else { "■" };
-                                let note = if t.available { "" } else { " · unlocks with Q-learning" };
-                                view! {
-                                    <span class="task" class:done=t.done class:locked=!t.available>
-                                        {format!("{glyph} {}{note}", t.label)}
-                                    </span>
-                                }
-                            })
-                            .collect_view()
-                    }}
-                </span>
-                {move || {
-                    level_complete()
-                        .then(|| {
-                            view! {
-                                <span class="complete glow" class:fresh=move || just_completed.get()>
-                                    "✓ LEVEL COMPLETE"
-                                </span>
-                            }
-                        })
-                }}
+                </button>
                 {move || {
                     next_level()
                         .filter(|&i| level_complete() && can_open(i))
                         .map(|i| {
                             view! {
-                                <button class="sail-on" on:click=move |_| level_id.set(LEVELS[i].id.to_string())>
+                                <button class="sail-on" on:click=move |_| open_level(i)>
                                     {format!("SAIL ON TO {} ▶", LEVELS[i].menu_label)}
                                 </button>
                             }
                         })
                 }}
-            </section>
+            </nav>
 
-            <main class="main">
-                <div class="stage">
+            <main
+                class="main"
+                on:click=move |e: web_sys::MouseEvent| {
+                    let inside = e
+                        .target()
+                        .and_then(|t| t.dyn_into::<web_sys::Element>().ok())
+                        .and_then(|el| el.closest(".objective").ok().flatten())
+                        .is_some();
+                    if !inside {
+                        objective_open.set(false);
+                    }
+                }
+            >
+                <section
+                    class="objective"
+                    class:hl-box=move || is_hl(UiElement::Objective)
+                    style:display=move || if objective_open.get() { "flex" } else { "none" }
+                    aria-label="Objective"
+                >
+                    <div class="objective-head">
+                        <span class="objective-label">"OBJECTIVE"</span>
+                        <span style="flex: 1"></span>
+                        <button class="quiet" title="Close (Esc)" on:click=move |_| objective_open.set(false)>
+                            "✕"
+                        </button>
+                    </div>
+                    <span class="objective-text">
+                        {move || {
+                            snapshot
+                                .with(|s| s.as_ref().and_then(|s| s.objective.as_ref().map(|o| o.text.clone())))
+                                .unwrap_or_default()
+                        }}
+                    </span>
+                    <span class="objective-stats">
+                        {move || {
+                            snapshot
+                                .with(|s| s.as_ref().map(|s| progress.with(|p| objective_stats(s, p))))
+                                .unwrap_or_default()
+                        }}
+                    </span>
+                    <ul class="tasks">
+                        {move || {
+                            task_states()
+                                .into_iter()
+                                .map(|t| {
+                                    let glyph = if t.done { "✓" } else if t.available { "○" } else { "■" };
+                                    let note = if t.available { "" } else { " · not available yet" };
+                                    view! {
+                                        <li class="task" class:done=t.done class:locked=!t.available>
+                                            {format!("{glyph} {}{note}", t.label)}
+                                        </li>
+                                    }
+                                })
+                                .collect_view()
+                        }}
+                    </ul>
+                    {move || {
+                        level_complete()
+                            .then(|| {
+                                view! {
+                                    <span class="complete glow" class:fresh=move || just_completed.get()>
+                                        "✓ LEVEL COMPLETE"
+                                    </span>
+                                }
+                            })
+                    }}
+                </section>
+                <div class="stage" class:walking=move || view.get() == View::Walkthrough>
                     <section
                         class="arena-wrap"
                         class:hl-box=move || is_hl(UiElement::Arena)
-                        style:display=move || if view.get() == View::Analyse { "none" } else { "flex" }
+                        style:display=move || if view.get().is_panel() { "none" } else { "flex" }
                     >
-                        <canvas node_ref=canvas_ref width="720" height="720" aria-label="Arena"></canvas>
+                        <canvas
+                            node_ref=canvas_ref
+                            width="720"
+                            height="720"
+                            aria-label="Arena · click a cell to inspect its Q-values"
+                            on:click=move |e: web_sys::MouseEvent| {
+                                let Some(canvas) = canvas_ref.get_untracked() else { return };
+                                let sx = render::CANVAS_SIZE / f64::from(canvas.client_width().max(1));
+                                let sy = render::CANVAS_SIZE / f64::from(canvas.client_height().max(1));
+                                let (x, y) = (f64::from(e.offset_x()) * sx, f64::from(e.offset_y()) * sy);
+                                let model = if view.get_untracked() == View::Walkthrough {
+                                    lesson_model.with_untracked(|m| m.as_ref().map(|m| m.0.clone()))
+                                } else {
+                                    snapshot.with_untracked(|s| s.as_ref().map(|s| s.render.clone()))
+                                };
+                                if let Some(cell) = model.and_then(|m| render::cell_at(&m, x, y)) {
+                                    selected_cell.update(|c| *c = if *c == Some(cell) { None } else { Some(cell) });
+                                }
+                            }
+                        ></canvas>
                     </section>
-                    {move || (view.get() == View::Analyse).then(|| analyse_view(analyse_ctx))}
+                    {move || match view.get() {
+                        View::Configure => configure_view(train_ctx).into_any(),
+                        View::Train => train_view(train_ctx).into_any(),
+                        View::Walkthrough => walkthrough_view(walk_ctx).into_any(),
+                        View::Analyse => analyse_view(analyse_ctx).into_any(),
+                        View::Deploy => deploy_view(train_ctx).into_any(),
+                        View::Arena | View::StyleSheet => ().into_any(),
+                    }}
                 </div>
 
                 <aside class="side">
                     <section class="panel">
-                        <div class="beat">{move || current_step().map(|s| s.0)}</div>
+                        <div class="briefing-head">
+                            <span class="beat">{move || current_step().map(|s| s.0)}</span>
+                            <span class="depth" role="group" aria-label="Explanation depth">
+                                {[(Depth::Story, "STORY"), (Depth::Intuition, "INTUITION"), (Depth::Math, "MATH")]
+                                    .into_iter()
+                                    .map(|(d, label)| {
+                                        view! {
+                                            <button
+                                                class:active=move || depth.get() == d
+                                                aria-pressed=move || (depth.get() == d).to_string()
+                                                on:click=move |_| depth.set(d)
+                                            >
+                                                {label}
+                                            </button>
+                                        }
+                                    })
+                                    .collect_view()}
+                            </span>
+                        </div>
                         <h2 class="glow">{move || current_step().map(|s| s.1)}</h2>
                         <div class="tutorial-text">{move || current_step().map(|s| s.2)}</div>
-                        <div class="row">
-                            {[(Depth::Story, "STORY"), (Depth::Intuition, "INTUITION"), (Depth::Math, "MATH")]
-                                .into_iter()
-                                .map(|(d, label)| {
-                                    view! {
-                                        <button class:active=move || depth.get() == d on:click=move |_| depth.set(d)>
-                                            {label}
-                                        </button>
-                                    }
-                                })
-                                .collect_view()}
-                        </div>
+                        {move || step_extra(tutorial_index.get())}
                         <div class="row" style="margin-top: 0.5rem">
                             <button
                                 disabled=move || tutorial_index.get() == 0
@@ -688,47 +1417,135 @@ pub fn App() -> impl IntoView {
                         </div>
                     </section>
 
-                    <section class="panel">
-                        <h2>"THE RL LOOP"</h2>
+                    <Fold
+                        title="THE RL LOOP"
+                        folded=folded(SidePanel::Loop)
+                        on_toggle=toggle_fold(SidePanel::Loop)
+                        summary=Signal::derive(hud(
+                            |s| format!("episode {} · step {} · return {}", s.episode, s.step, signed(f64::from(s.episode_return))),
+                            |l, line| {
+                                let (moves, ret) = lesson_code::displayed_progress(l, line);
+                                format!("episode {} · step {moves} · return {}", l.episode, signed(f64::from(ret)))
+                            },
+                        ))
+                        hl=move || false
+                    >
                         <div class="hud">
                             <span class="label" class:hl=move || is_hl(UiElement::State)>"STATE"</span>
                             <span class="value">
-                                {snap_text(|s| match (s.state_index, s.state_count) {
-                                    (Some(i), Some(n)) => format!("cell {i} · ({}, {}) · {n} states", s.position.0, s.position.1),
-                                    _ => format!("({}, {})", s.position.0, s.position.1),
-                                })}
+                                {hud(
+                                    |s| match (s.state_index, s.state_count) {
+                                        (Some(i), Some(n)) => format!("cell {i} · ({}, {}) · {n} states", s.position.0, s.position.1),
+                                        _ => format!("({}, {})", s.position.0, s.position.1),
+                                    },
+                                    |l, line| {
+                                        let (i, c) = lesson_code::displayed_state(l, line);
+                                        format!("cell {i} · {}", lesson_code::cell(c))
+                                    },
+                                )}
                             </span>
                             <span class="label" class:hl=move || is_hl(UiElement::Action)>"ACTION"</span>
-                            <span class="value">{snap_text(|s| s.last_action.clone().unwrap_or("—".into()))}</span>
+                            <span class="value">
+                                {hud(
+                                    |s| s.last_action.clone().unwrap_or("—".into()),
+                                    |l, line| {
+                                        l.last
+                                            .as_ref()
+                                            .filter(|_| line >= lesson_code::CHOOSE)
+                                            .map_or("—".into(), |m| m.action_label.clone())
+                                    },
+                                )}
+                            </span>
                             <span class="label" class:hl=move || is_hl(UiElement::Reward)>"REWARD"</span>
                             <span class="value">
-                                {snap_text(|s| s.last_reward.map_or("—".into(), |r| signed(f64::from(r))))}
+                                {hud(
+                                    |s| s.last_reward.map_or("—".into(), |r| signed(f64::from(r))),
+                                    |l, line| {
+                                        l.last
+                                            .as_ref()
+                                            .filter(|_| line >= lesson_code::ACT)
+                                            .map_or("—".into(), |m| signed(f64::from(m.trace.reward)))
+                                    },
+                                )}
                             </span>
                             <span class="label" class:hl=move || is_hl(UiElement::Return)>"RETURN"</span>
-                            <span class="value">{snap_text(|s| signed(f64::from(s.episode_return)))}</span>
+                            <span class="value">
+                                {hud(
+                                    |s| signed(f64::from(s.episode_return)),
+                                    |l, line| signed(f64::from(lesson_code::displayed_progress(l, line).1)),
+                                )}
+                            </span>
                             <span class="label" class:hl=move || is_hl(UiElement::Step)>"STEP"</span>
-                            <span class="value">{snap_text(|s| format!("{} / {}", s.step, s.max_steps))}</span>
+                            <span class="value">
+                                {hud(
+                                    |s| format!("{} / {}", s.step, s.max_steps),
+                                    |l, line| format!("{} / {}", lesson_code::displayed_progress(l, line).0, l.max_steps),
+                                )}
+                            </span>
                             <span class="label" class:hl=move || is_hl(UiElement::Episode)>"EPISODE"</span>
                             <span class="value">
-                                {snap_text(|s| {
+                                {hud(|s| {
                                     let status = match s.outcome {
                                         Outcome::Sailing => "sailing",
                                         Outcome::ReachedShore => "reached the shore",
+                                        Outcome::Died => "swallowed by a whirlpool",
                                         Outcome::OutOfTime => "out of time",
                                     };
                                     let pilot = match s.sailed_by {
                                         SailedBy::Nobody => "",
                                         SailedBy::Player => " · by you",
                                         SailedBy::RandomAgent => " · by the random agent",
+                                        SailedBy::TrainedAgent => " · by the trained raft",
                                     };
                                     format!("{} · {status}{pilot}", s.episode)
-                                })}
+                                },
+                                |l, _| format!("training episode {} · walkthrough · seed {}", l.episode, l.seed))}
                             </span>
                         </div>
-                    </section>
+                    </Fold>
 
-                    <section class="panel">
-                        <h2>"VOYAGE"</h2>
+                    {move || {
+                        (pilot() == Some(Pilot::Agent))
+                            .then(|| {
+                                view! {
+                                    <Fold
+                                        title="Q-VALUES"
+                                        folded=folded(SidePanel::QValues)
+                                        on_toggle=toggle_fold(SidePanel::QValues)
+                                        summary=Signal::derive(move || {
+                                            inspected
+                                                .get()
+                                                .map(|(c, _)| {
+                                                    let best = c.values.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                                                    let low = c.values.iter().copied().fold(f32::INFINITY, f32::min);
+                                                    let i = c.values.iter().position(|&v| v == best).unwrap_or(0);
+                                                    let pref = if best - low > 1e-6 { COMPASS[i].1 } else { "no preference" };
+                                                    format!("{} · {pref}", lesson_code::cell(c.cell))
+                                                })
+                                                .unwrap_or_default()
+                                        })
+                                        hl=move || is_hl(UiElement::QValues)
+                                    >
+                                        {move || q_inspector().map_or_else(
+                                            || view! { <p class="subtitle">"No Q-table to show yet."</p> }.into_any(),
+                                            IntoAny::into_any,
+                                        )}
+                                    </Fold>
+                                }
+                            })
+                    }}
+
+                    <Fold
+                        title="VOYAGE"
+                        folded=folded(SidePanel::Voyage)
+                        on_toggle=toggle_fold(SidePanel::Voyage)
+                        summary=Signal::derive(move || {
+                            snapshot
+                                .with(|s| s.as_ref().and_then(|s| s.log.last().cloned()))
+                                .unwrap_or_else(|| format!("seed {}", seed.get()))
+                        })
+                        hl=move || false
+                    >
                         <div class="row" class:hl-box=move || is_hl(UiElement::Seed)>
                             "SEED"
                             <input
@@ -758,16 +1575,45 @@ pub fn App() -> impl IntoView {
                             Some(Pilot::Agent) => {
                                 view! {
                                     <div class="row pilot" class:hl-box=move || is_hl(UiElement::Autopilot)>
-                                        <button
-                                            class="primary"
-                                            on:click=move |_| {
-                                                if autopilot_on.get_untracked() { stop_autopilot() } else { start_autopilot() }
+                                        {move || {
+                                            if autopilot_on.get() {
+                                                view! { <button class="primary" on:click=move |_| stop_autopilot()>"■ STOP"</button> }
+                                                    .into_any()
+                                            } else {
+                                                view! {
+                                                    <button class="primary" on:click=move |_| start_autopilot(false)>
+                                                        "▶ WATCH RANDOM AGENT"
+                                                    </button>
+                                                    <button
+                                                        class="primary"
+                                                        disabled=move || !trained()
+                                                        title=move || if trained() { "" } else { "Train a raft first" }
+                                                        on:click=move |_| start_autopilot(true)
+                                                    >
+                                                        "▶ WATCH TRAINED RAFT"
+                                                    </button>
+                                                }
+                                                    .into_any()
                                             }
-                                        >
-                                            {move || if autopilot_on.get() { "■ STOP" } else { "▶ WATCH RANDOM AGENT" }}
-                                        </button>
-                                        <span class="subtitle">"steering is off · the agent sails"</span>
+                                        }}
                                     </div>
+                                    <p class="row subtitle">
+                                        {move || {
+                                            if autopilot_on.get() {
+                                                if autopilot_trained.get() { "the trained raft sails" } else { "the random agent sails" }
+                                            } else {
+                                                "steering is off · an agent sails"
+                                            }
+                                        }}
+                                        <label class="toggle">
+                                            <input
+                                                type="checkbox"
+                                                prop:checked=move || show_policy.get()
+                                                on:change=move |_| show_policy.update(|v| *v = !*v)
+                                            />
+                                            "show learned policy"
+                                        </label>
+                                    </p>
                                 }
                                     .into_any()
                             }
@@ -789,43 +1635,58 @@ pub fn App() -> impl IntoView {
                                     .collect_view()
                             }}
                         </div>
-                        {move || error.get().map(|e| view! { <p style="color: var(--adversary)">{"ERROR: "}{e}</p> })}
-                    </section>
+                    </Fold>
+                    {move || error.get().map(|e| view! { <p class="panel error">{"ERROR: "}{e}</p> })}
                 </aside>
             </main>
 
-            <nav class="phasebar">
-                {["CONFIGURE", "TRAIN"]
+            <footer class="phasebar">
+                {[
+                    (View::Configure, "CONFIGURE", UiElement::Configure, "Learning settings and rewards for a new raft"),
+                    (View::Train, "TRAIN", UiElement::Train, "Train the raft and watch its learning curve"),
+                    (View::Analyse, "ANALYSE", UiElement::Analyse, "Run batch experiments on the random agent"),
+                    (View::Deploy, "DEPLOY", UiElement::Deploy, "Test the trained raft on fixed seeds"),
+                ]
                     .into_iter()
-                    .map(|p| view! { <button class="phase" disabled=true title="Unlocks with Q-learning in Milestone 1">{p}</button> })
+                    .map(|(v, label, el, about)| {
+                        view! {
+                            <button
+                                class="phase"
+                                class:active=move || {
+                                    view.get() == v || (v == View::Train && view.get() == View::Walkthrough)
+                                }
+                                class:hl-box=move || is_hl(el)
+                                disabled=move || pilot() != Some(Pilot::Agent)
+                                title=move || if pilot() == Some(Pilot::Agent) { about } else { "In this level you are the pilot" }
+                                on:click=move |_| view.set(v)
+                            >
+                                {label}
+                            </button>
+                        }
+                    })
                     .collect_view()}
-                <button
-                    class="phase"
-                    class:active=move || view.get() == View::Analyse
-                    class:hl-box=move || is_hl(UiElement::Analyse)
-                    disabled=move || pilot() != Some(Pilot::Agent)
-                    title=move || if pilot() == Some(Pilot::Agent) { "Run batch experiments on the agent" } else { "In this level you are the pilot" }
-                    on:click=move |_| view.set(View::Analyse)
-                >
-                    "ANALYSE"
-                </button>
-                <button class="phase" disabled=true title="Unlocks with Q-learning in Milestone 1">"DEPLOY"</button>
-            </nav>
-            <footer class="statusbar">
-                <span>"TRAINING ON: local · simulation in Web Worker"</span>
                 <span style="flex: 1"></span>
+                <span class="status">{format!("TRAINING ON: {target_label}")}</span>
+                <button
+                    class="quiet"
+                    class:active=move || view.get() == View::StyleSheet
+                    on:click=move |_| view.set(View::StyleSheet)
+                >
+                    "STYLE SHEET"
+                </button>
                 <button
                     class="quiet"
                     on:click=move |_| {
                         if window().confirm_with_message("Reset all campaign progress?").unwrap_or(false) {
                             progress.set(Progress::default());
+                            leptos::task::spawn_local(store::forget_all());
                             level_id.set(LEVELS[0].id.to_string());
                         }
                     }
                 >
                     "RESET PROGRESS"
                 </button>
-                <span>"MILESTONE 0"</span>
+                <span class="status">"MILESTONE 1"</span>
             </footer>
         </div>
     }
