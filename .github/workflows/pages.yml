@@ -1,0 +1,64 @@
+# Builds the web client and publishes it to GitHub Pages on every push to main:
+# https://sandrospina.github.io/ithaca/
+name: Deploy to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One deployment at a time; a newer push replaces a queued one.
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+env:
+  TRUNK_VERSION: 0.22.1
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install Trunk
+        run: |
+          curl -sSL "https://github.com/trunk-rs/trunk/releases/download/v${TRUNK_VERSION}/trunk-x86_64-unknown-linux-gnu.tar.gz" \
+            | tar -xz -C /usr/local/bin trunk
+          trunk --version
+
+      - name: Test
+        run: cargo test --workspace
+
+      - name: Build
+        working-directory: crates/rl-web
+        env:
+          BUILD_COMMIT: ${{ github.sha }}
+        run: |
+          export BUILD_COMMIT="${BUILD_COMMIT::7}"
+          trunk build --release --cargo-profile wasm-release --dist ../../target/site --public-url /ithaca/
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: target/site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

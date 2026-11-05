@@ -1686,7 +1686,9 @@ pub fn App() -> impl IntoView {
                 >
                     "RESET PROGRESS"
                 </button>
-                <span class="status">"MILESTONE 1"</span>
+                <span class="status" title="The build you are running: quote it when reporting a problem">
+                    {concat!("MILESTONE 1 · BUILD ", env!("BUILD_COMMIT"))}
+                </span>
             </footer>
         </div>
     }

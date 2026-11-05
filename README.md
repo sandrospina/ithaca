@@ -88,6 +88,15 @@ Controls:
 | Space | Walkthrough: step one line |
 | Enter | Walkthrough: step one move |
 
+## Test on other computers
+
+- **GitHub Pages:** every push to `main` is tested, built and published to <https://sandrospina.github.io/ithaca/>
+  (`.github/workflows/pages.yml`). One-time setup: Settings → Pages → Source: GitHub Actions.
+- **Local network:** `scripts/serve-lan.sh` builds the release client and serves it on port 8081 to other
+  computers on the same network.
+
+The status bar shows the build's commit. `docs/testing.md` has the checklist for testers.
+
 ## Debug URL parameters
 
 Useful for testing and screenshots:
