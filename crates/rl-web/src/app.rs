@@ -1314,17 +1314,6 @@ pub fn App() -> impl IntoView {
                         }
                     }}
                 </button>
-                {move || {
-                    next_level()
-                        .filter(|&i| level_complete() && can_open(i))
-                        .map(|i| {
-                            view! {
-                                <button class="sail-on" on:click=move |_| open_level(i)>
-                                    {format!("SAIL ON TO {} ▶", LEVELS[i].menu_label)}
-                                </button>
-                            }
-                        })
-                }}
             </nav>
 
             <main
@@ -1387,9 +1376,22 @@ pub fn App() -> impl IntoView {
                         level_complete()
                             .then(|| {
                                 view! {
-                                    <span class="complete glow" class:fresh=move || just_completed.get()>
-                                        "✓ LEVEL COMPLETE"
-                                    </span>
+                                    <div class="complete-row">
+                                        <span class="complete glow" class:fresh=move || just_completed.get()>
+                                            "✓ LEVEL COMPLETE"
+                                        </span>
+                                        {move || {
+                                            next_level()
+                                                .filter(|&i| can_open(i))
+                                                .map(|i| {
+                                                    view! {
+                                                        <button class="sail-on" on:click=move |_| open_level(i)>
+                                                            {format!("SAIL ON TO {} ▶", LEVELS[i].menu_label)}
+                                                        </button>
+                                                    }
+                                                })
+                                        }}
+                                    </div>
                                 }
                             })
                     }}
@@ -1513,23 +1515,37 @@ pub fn App() -> impl IntoView {
                                     },
                                 )}
                             </span>
-                            <span class="label" class:hl=move || is_hl(UiElement::Reward)>"REWARD"</span>
+                            <span
+                                class="label"
+                                class:hl=move || is_hl(UiElement::Reward)
+                                title="What the sea pays for one move, the moment it is made"
+                            >
+                                "REWARD"
+                            </span>
                             <span class="value">
                                 {hud(
-                                    |s| s.last_reward.map_or("—".into(), |r| signed(f64::from(r))),
+                                    |s| reward_text(s.last_reward),
                                     |l, line| {
-                                        l.last
-                                            .as_ref()
-                                            .filter(|_| line >= lesson_code::ACT)
-                                            .map_or("—".into(), |m| signed(f64::from(m.trace.reward)))
+                                        reward_text(
+                                            l.last.as_ref().filter(|_| line >= lesson_code::ACT).map(|m| m.trace.reward),
+                                        )
                                     },
                                 )}
                             </span>
-                            <span class="label" class:hl=move || is_hl(UiElement::Return)>"RETURN"</span>
+                            <span
+                                class="label"
+                                class:hl=move || is_hl(UiElement::Return)
+                                title="Every reward of this episode added up: the score a voyage is judged by, and what an agent learns to maximise"
+                            >
+                                "RETURN"
+                            </span>
                             <span class="value">
                                 {hud(
-                                    |s| signed(f64::from(s.episode_return)),
-                                    |l, line| signed(f64::from(lesson_code::displayed_progress(l, line).1)),
+                                    |s| return_text(s.episode_return, s.step),
+                                    |l, line| {
+                                        let (moves, g) = lesson_code::displayed_progress(l, line);
+                                        return_text(g, moves)
+                                    },
                                 )}
                             </span>
                             <span class="label" class:hl=move || is_hl(UiElement::Step)>"STEP"</span>
@@ -1751,5 +1767,19 @@ pub fn App() -> impl IntoView {
                 </span>
             </footer>
         </div>
+    }
+}
+
+/// The RL loop's REWARD value: one move's reward.
+fn reward_text(reward: Option<f32>) -> String {
+    reward.map_or("—".into(), |r| format!("{} · this move", signed(f64::from(r))))
+}
+
+/// The RL loop's RETURN value: the episode's rewards so far, added up.
+fn return_text(episode_return: f32, moves: u32) -> String {
+    match moves {
+        0 => "0 · no rewards yet".into(),
+        1 => format!("{} · 1 reward so far", signed(f64::from(episode_return))),
+        n => format!("{} · sum of {n} rewards", signed(f64::from(episode_return))),
     }
 }

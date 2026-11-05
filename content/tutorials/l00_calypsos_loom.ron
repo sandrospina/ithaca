@@ -39,7 +39,7 @@ Tutorial(
       title: "What you get: the reward",
       text: (
         story: "Every stroke costs you strength. The shore rewards you well.",
-        intuition: "After each action the environment returns a REWARD: −1 for every move, +10 for reaching the shore.",
+        intuition: "After each action the environment pays a REWARD: −1 for every move, +10 for reaching the shore. A reward judges one move only, the moment it is made. Watch the REWARD line in the RL loop change with every stroke.",
         math: "r_{t+1} = −1 per step, plus 10 when s_{t+1} is the goal cell.",
       ),
       highlight: [Reward],
@@ -49,7 +49,7 @@ Tutorial(
       title: "What counts: the return",
       text: (
         story: "A good voyage is not one good stroke. It is the sum of all of them.",
-        intuition: "The RETURN adds up every reward in the EPISODE, from launch to shore. The shortest voyage has the highest return.",
+        intuition: "The RETURN adds up every reward in the EPISODE, from launch to shore: it judges the whole voyage. A reward can look bad while the return is good: each move pays −1, yet moving is the only way to collect the +10. That is why an agent tries to make the return large, not each reward. The shortest voyage has the highest return.",
         math: "G = r_1 + r_2 + … + r_T. The shortest path takes 8 moves, so the best return is −8 + 10 = 2.",
       ),
       highlight: [Return, Step, Episode],

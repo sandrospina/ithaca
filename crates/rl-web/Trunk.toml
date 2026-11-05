@@ -7,3 +7,7 @@ release = false
 addresses = ["127.0.0.1"]
 port = 8080
 open = false
+
+# The level and tutorial files are compiled in: rebuild when they change too.
+[watch]
+watch = [".", "../../content"]
