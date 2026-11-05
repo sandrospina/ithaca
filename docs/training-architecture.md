@@ -37,11 +37,49 @@ The DGX Spark and the RTX 2080 PC are assumed to run Linux. The RX 9070 XT PC ru
 | AMD ROCm (9070 XT) | yes | no |
 | Vulkan fallback on any GPU | yes (wgpu) | no |
 | WebGPU in the browser | yes (wgpu) | no |
-| One model definition across all of the above | yes, backend is a generic parameter | no |
+| One model definition across all of the above | yes, the backend is chosen at run time by the `Device` | no |
 
-Model code is written once as `Model<B: Backend>` and instantiated per machine.
+Model code is written once and runs on whichever `Device` it is given. Since Burn 0.22 there is no backend type
+parameter: `Device::cuda(0)`, `Device::rocm(0)`, `Device::vulkan(..)`, `Device::webgpu(..)` or `Device::flex()`
+(pure-Rust CPU), each behind its Cargo feature, and `device.autodiff()` for training.
 
 **Risk to spike early:** Burn's CUDA backend on the DGX Spark (ARM64 host + Blackwell + CUDA 13). Run a small Burn training example on all three servers and in the browser before Milestone 8.
+
+### Hardware spike (started 2026-11-04)
+
+The spike program is `spikes/burn/`; its README has the command for each machine. It trains the same small network
+on each backend, fitted to the Q-table the game's tabular Q-learning learns on Level 1, and checks a matmul against
+an f64 reference, the network's greedy policy, bit-determinism, and a benchmark loss recomputed on the host.
+
+Burn 0.22.1, CubeCL 0.11.3.
+
+| Machine | Backend | Result | Deterministic | Throughput (256→512→512→4, batch 4096) | Notes |
+|---|---|---|---|---|---|
+| Developer Mac, Apple M5 | Metal (native wgpu) | PASS | yes | 1.1 TFLOP/s; 1.3 with autotune | autotune costs 10–20 s on first use |
+| Developer Mac, Apple M5 | Flex (CPU) | PASS | yes | 0.18–0.29 TFLOP/s at batch 1024 | the CPU fallback |
+| Chrome (headless), Apple M5 | WebGPU, fusion, **no autotune** | PASS (3 of 3 runs) | yes | 30–52 GFLOP/s | fit 9.8 s warm |
+| Chrome (headless), Apple M5 | WebGPU with autotune | **wrong results in 4 of 5 runs** | no | — | see below |
+| DGX Spark | CUDA | not run yet | | | |
+| DGX Spark | Vulkan | not run yet | | | fallback |
+| RTX 2080 PC | CUDA | not run yet | | | |
+| RTX 2080 PC | Vulkan | not run yet | | | fallback |
+| RX 9070 XT, Windows | Vulkan / DX12 (native wgpu) | not run yet | | | guaranteed baseline |
+| RX 9070 XT, WSL2 | ROCm | not run yet | | | |
+
+Findings so far:
+
+- **Browser training must turn kernel autotuning off.** With it on (Burn's default), one CubeCL matmul variant fails
+  WGSL validation in Chrome, does no work, times as fastest and is sometimes chosen. Results are then silently wrong:
+  a negative mean-squared loss, NaN, a network that disagrees with its target. Build the browser with
+  `default-features = false` and `fusion`, without `autotune`. Fusion is safe and makes the small fit 3× faster.
+- WebGPU in the browser is about 20–40× slower than native Metal on the same GPU for this network. Small networks
+  (Milestone 8's DQN levels) are fine locally; anything larger belongs on the servers, as planned.
+- The CUDA and ROCm backends compile kernels through an LLVM that Burn bundles; no system LLVM is needed on Linux.
+  (On macOS the bundled LLVM needs Homebrew's zstd, which is why these two builds were not compile-checked here.)
+- Every check that can fail does so loudly: a backend counts as working only with `PASS` from the spike, not just
+  because it starts.
+
+Exit criterion still open: a `PASS` line for each server, pasted into the table above.
 
 ## 3. Topology: coordinator + workers
 
@@ -180,7 +218,7 @@ Storage:
 |---|---|
 | 0–1 | Training runs in a Web Worker from day one. Introduce a `TrainingTarget` abstraction with only the local implementation. |
 | 2 | Freeze `ExperimentConfig` as a versioned, serialisable job spec with a validation schema. |
-| After 1 | Burn hardware spike on all three servers + browser WebGPU. On the 9070 XT, test both WSL2 + ROCm and native Windows + wgpu. |
+| After 1 | Burn hardware spike on all three servers + browser WebGPU. On the 9070 XT, test both WSL2 + ROCm and native Windows + wgpu. Browser and developer Mac done 2026-11-04 (§2); servers pending. |
 | **7.5a** | `calypso-worker` in standalone mode with **tabular Q-learning**. Proves streaming, cancellation and policy download. |
 | **7.5b** | `calypso-coordinator`: OAuth sign-in, invite list, server directory, per-device queues, quotas, policy library. Connect all three workers. |
 | 8 | DQN on workers. Regression test: DQN matches tabular on an already-solved level, on every backend. |

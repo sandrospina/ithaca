@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Burn spike · WebGPU</title>
+  <link data-trunk rel="rust" data-bin="burn-spike" data-cargo-no-default-features data-cargo-features="webgpu,fusion" />
+  <script>
+    // Diagnostics: report why a WebGPU device is lost and any error wgpu does not capture.
+    window.gpuEvents = [];
+    if (navigator.gpu) {
+      const request = GPUAdapter.prototype.requestDevice;
+      GPUAdapter.prototype.requestDevice = async function (...args) {
+        const info = this.info || {};
+        window.gpuEvents.push(`adapter: ${info.vendor} ${info.architecture} ${info.device} ${info.description}`);
+        const device = await request.apply(this, args);
+        device.lost.then((l) => window.gpuEvents.push(`device lost: ${l.reason} · ${l.message}`));
+        device.addEventListener("uncapturederror", (e) => {
+          if (window.gpuEvents.length < 20) window.gpuEvents.push(`uncaptured ${e.error.constructor.name}: ${e.error.message}`);
+        });
+        return device;
+      };
+    }
+  </script>
+  <style>
+    body { background: #0B0906; color: #FFB000; font: 14px "IBM Plex Mono", ui-monospace, monospace; padding: 1.5rem; }
+    pre { white-space: pre-wrap; }
+  </style>
+</head>
+<body>
+  <pre id="out"></pre>
+</body>
+</html>

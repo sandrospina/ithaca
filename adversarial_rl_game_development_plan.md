@@ -252,6 +252,9 @@ A one-to-two-day hardware test, not deep-RL work:
 
 Each machine has a confirmed working backend, recorded in `docs/training-architecture.md`.
 
+Status (2026-11-04): the spike program is in `spikes/burn/`. Browser WebGPU and the developer's Mac pass; browser
+training needs kernel autotuning off (details in `training-architecture.md` §2). The three servers are still to run.
+
 ------------------------------------------------------------------------
 
 ## Milestone 2 — RL experiment infrastructure
@@ -810,7 +813,7 @@ Levels 14–16: 2v2, shared and centralised-critic team policies, communication,
 -   [x] Q-table persistence in IndexedDB, and the `TrainingTarget` abstraction (local worker only).
 -   [x] Learned-policy deployment.
 -   [ ] Experiment serialisation and replay recording. *(Trained rafts are saved per level with a level-file hash; experiment specifications and run comparison are Milestone 2.)*
--   [ ] Burn hardware spike on all three servers and the browser.
+-   [ ] Burn hardware spike on all three servers and the browser. Browser and Mac done; servers pending (`spikes/burn/README.md`).
 -   [x] Level 2: hazards, lotus lure, reward editor, tutorial.
 -   [ ] Level 3: scripted Cyclops, Observation Builder, spec hashes, tutorial.
 -   [ ] Compare agent-only observation with agent + Cyclops.

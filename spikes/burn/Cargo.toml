@@ -1,0 +1,48 @@
+[package]
+name = "burn-spike"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Hardware spike: one small Burn model trained on every backend we plan to use."
+
+# A workspace of its own, so Burn stays out of the game's build and test runs.
+[workspace]
+
+[features]
+default = ["flex"]
+flex = ["burn/flex"]
+cpu = ["burn/cpu"]
+wgpu = ["burn/wgpu"]
+metal = ["wgpu", "burn/metal"]
+vulkan = ["wgpu", "burn/vulkan"]
+webgpu = ["wgpu", "burn/webgpu"]
+cuda = ["burn/cuda"]
+rocm = ["burn/rocm"]
+# Kernel autotuning and operation fusion for the GPU backends.
+autotune = ["burn/autotune"]
+fusion = ["burn/fusion"]
+
+[dependencies]
+# No default features: kernel autotuning and fusion are opt-in below, so their
+# effect on each backend can be measured (see README).
+burn = { version = "0.22.1", default-features = false, features = ["std", "optim"] }
+rl-core = { path = "../../crates/rl-core" }
+rl-envs = { path = "../../crates/rl-envs" }
+rl-agents = { path = "../../crates/rl-agents" }
+rl-training = { path = "../../crates/rl-training" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+web-time = "1"
+
+[profile.release]
+opt-level = 3
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+pollster = "0.4"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2"
+# Burn's default features used to enable the browser's random source; with them off, say so here.
+getrandom = { version = "0.4", features = ["wasm_js"] }
+wasm-bindgen-futures = "0.4"
+web-sys = { version = "0.3", features = ["console", "Document", "Element", "Window"] }
