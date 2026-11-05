@@ -15,11 +15,14 @@ use wasm_bindgen::prelude::Closure;
 use crate::analyse::{AnalyseCtx, analyse_view};
 use crate::campaign::{Answer, AnswerOutcome, Progress, STORAGE_KEY};
 use crate::chart_math::signed;
+use crate::compare::{CompareCtx, Pending, compare_view};
 use crate::content::{self, LEVELS};
+use crate::experiments::{ExperimentLog, Selection};
 use crate::lesson_code::{self, LineStep, Reveal, UPDATE};
+use crate::library::{LibraryCtx, library_view};
 use crate::protocol::{
-    BatchReport, DeployReport, ExperimentResult, GoalDef, LessonMode, LessonState, Outcome, Pilot, QLearningConfig,
-    SailedBy, SavedRaft, SimRequest, SimResponse, Snapshot,
+    BatchReport, DeployReport, ExperimentResult, GoalDef, LessonMode, LessonState, Outcome, Pilot, PlayerEdits,
+    QLearningConfig, SailedBy, SavedRaft, SimRequest, SimResponse, Snapshot,
 };
 use crate::render::{self, Effects, Highlights, Layers, Marks, RenderState, Updated};
 use crate::sim::experiment_spec;
@@ -50,7 +53,9 @@ impl Stage {
             | UiElement::Rewards
             | UiElement::Train
             | UiElement::Walkthrough
-            | UiElement::Deploy => Some(Stage::Learn),
+            | UiElement::Deploy
+            | UiElement::Compare
+            | UiElement::Observation => Some(Stage::Learn),
             _ => None,
         }
     }
@@ -70,6 +75,10 @@ enum View {
     Walkthrough,
     Analyse,
     Deploy,
+    /// Experiments and their comparison.
+    Compare,
+    /// The concept library.
+    Library,
 }
 
 /// The side panels below the briefing, which can be folded to a one-line summary.
@@ -142,7 +151,7 @@ fn Fold(
 impl View {
     /// Views that replace the arena with a panel.
     fn is_panel(self) -> bool {
-        matches!(self, View::Configure | View::Train | View::Analyse | View::Deploy)
+        matches!(self, View::Configure | View::Train | View::Analyse | View::Deploy | View::Compare | View::Library)
     }
 }
 
@@ -185,6 +194,8 @@ impl UrlParams {
                 Some("train") => View::Train,
                 Some("walkthrough") => View::Walkthrough,
                 Some("deploy") => View::Deploy,
+                Some("compare") => View::Compare,
+                Some("library") => View::Library,
                 _ => View::Arena,
             },
             plain: get("plain").as_deref() == Some("1"),
@@ -284,8 +295,9 @@ fn objective_stats(s: &Snapshot, progress: &Progress) -> String {
             }
             if let Some(b) = s.random_baseline {
                 parts.push(format!(
-                    "random agent over {} voyages: reaches the shore {:.0}% · mean return {}",
+                    "random agent over {} voyages: reaches {} {:.0}% · mean return {}",
                     b.episodes,
+                    s.goal_name,
                     b.success_rate * 100.0,
                     signed(f64::from(b.mean_return))
                 ));
@@ -297,16 +309,23 @@ fn objective_stats(s: &Snapshot, progress: &Progress) -> String {
 
 /// The settings a guided experiment pins, in one line.
 fn experiment_settings(def: &rl_tutorial::ExperimentDef) -> String {
-    let spec = experiment_spec(def);
-    let c = spec.config;
-    let mut parts = vec![format!("α {} · γ {} · ε {}", c.alpha, c.gamma, c.epsilon)];
-    parts.extend(spec.rewards.iter().map(|(k, v)| format!("{k} {}", signed(f64::from(*v)))));
-    parts.push(format!("{} episodes · training seed {}", spec.episodes, spec.training_seed));
+    let d = QLearningConfig::default();
+    let mut parts = vec![format!(
+        "α {} · γ {} · ε {}",
+        def.alpha.unwrap_or(d.alpha),
+        def.gamma.unwrap_or(d.gamma),
+        def.epsilon.unwrap_or(d.epsilon)
+    )];
+    parts.extend(def.rewards.iter().map(|(k, v)| format!("{k} {}", signed(f64::from(*v)))));
+    if let Some(features) = &def.observation {
+        parts.push(format!("observes {}", features.iter().map(|f| f.name()).collect::<Vec<_>>().join(" + ")));
+    }
+    parts.push(format!("{} episodes · training seed {}", def.episodes, def.training_seed));
     parts.join(" · ")
 }
 
-fn experiment_summary(r: &ExperimentResult) -> String {
-    let mut s = format!("{} of {} test voyages reached the shore", r.reached, r.tested);
+fn experiment_summary(r: &ExperimentResult, goal: &str) -> String {
+    let mut s = format!("{} of {} test voyages reached {goal}", r.reached, r.tested);
     if let Some(shortest) = r.shortest {
         s.push_str(&format!(" · {shortest} took the shortest route"));
     }
@@ -372,6 +391,16 @@ pub fn App() -> impl IntoView {
     let predictions = RwSignal::new(BTreeMap::<usize, usize>::new());
     let experiments = RwSignal::new(BTreeMap::<usize, ExperimentResult>::new());
     let experiment_running = RwSignal::new(None::<usize>);
+    let guided_label = StoredValue::new(None::<String>);
+    let guided_started = StoredValue::new(0.0f64);
+
+    // ---- experiment log and comparison
+    let experiment_log = RwSignal::new(ExperimentLog::new(&level_id.get_untracked()));
+    let log_loaded = StoredValue::new(None::<String>);
+    let selection = RwSignal::new(Selection::default());
+    let compare_pending = RwSignal::new(None::<Pending>);
+    let reruns = RwSignal::new(BTreeMap::<u32, bool>::new());
+    let compare_episodes = RwSignal::new(500u32);
 
     // ---- saved rafts
     let saved_key = StoredValue::new(None::<String>);
@@ -436,19 +465,51 @@ pub fn App() -> impl IntoView {
                     }
                 }
             }
-            SimResponse::Experiment { result, snapshot: s } => {
+            SimResponse::Experiment { result, snapshot: s, run } => {
                 error.set(None);
+                let pending = compare_pending.get_untracked();
+                compare_pending.set(None);
+                let adopted = |s: Box<Snapshot>| {
+                    sync_draft.set_value(true);
+                    deploy_report.set(None);
+                    snapshot.set(Some(*s));
+                    show_policy.set(true);
+                    view.set(View::Arena);
+                };
                 if let Some(step) = experiment_running.get_untracked() {
+                    experiment_running.set(None);
                     experiments.update(|e| {
                         e.insert(step, result);
                     });
+                    let label = guided_label.try_update_value(Option::take).flatten();
+                    let ms = now_ms() - guided_started.get_value();
+                    experiment_log.update(|l| {
+                        l.add(&run, label, Some(ms));
+                    });
+                    adopted(s);
+                    return;
                 }
-                experiment_running.set(None);
-                sync_draft.set_value(true);
-                deploy_report.set(None);
-                snapshot.set(Some(*s));
-                show_policy.set(true);
-                view.set(View::Arena);
+                match pending {
+                    Some(Pending::New { started_ms }) => {
+                        let id = experiment_log.try_update(|l| l.add(&run, None, Some(now_ms() - started_ms)));
+                        if let Some(id) = id {
+                            selection.update(|sel| {
+                                sel.toggle(id);
+                            });
+                        }
+                        snapshot.set(Some(*s));
+                    }
+                    Some(Pending::Rerun { id }) => {
+                        let same = experiment_log
+                            .with_untracked(|l| l.get(id).is_some_and(|r| r.fingerprint == run.fingerprint()));
+                        reruns.update(|m| {
+                            m.insert(id, same);
+                        });
+                        snapshot.set(Some(*s));
+                    }
+                    Some(Pending::Adopt { .. }) => adopted(s),
+                    None => snapshot.set(Some(*s)),
+                }
             }
             SimResponse::Export(save) => {
                 if let Ok(json) = serde_json::to_string(&*save) {
@@ -491,6 +552,7 @@ pub fn App() -> impl IntoView {
                 lesson_play.set(None);
                 lesson_reveal.set_value(None);
                 experiment_running.set(None);
+                compare_pending.set(None);
                 error.set(Some(e));
             }
         })
@@ -504,6 +566,7 @@ pub fn App() -> impl IntoView {
     let autopilot = StoredValue::new_local(None::<IntervalHandle>);
     let autopilot_on = RwSignal::new(false);
     let autopilot_trained = RwSignal::new(false);
+    let autopilot_replay = RwSignal::new(false);
     let stop_autopilot = move || {
         autopilot.update_value(|h| {
             if let Some(h) = h.take() {
@@ -516,8 +579,26 @@ pub fn App() -> impl IntoView {
         stop_autopilot();
         send(SimRequest::Reset { seed: seed.get_untracked() });
         autopilot_trained.set(trained);
+        autopilot_replay.set(false);
         if let Ok(h) = set_interval_with_handle(
             move || send(SimRequest::AgentStep { trained }),
+            Duration::from_millis(AUTOPILOT_MS),
+        ) {
+            autopilot.set_value(Some(h));
+            autopilot_on.set(true);
+        }
+    };
+
+    // A recorded voyage, played back move by move from its action log.
+    let start_replay = move |voyage_seed: u64, actions: Vec<u32>, edits: PlayerEdits| {
+        stop_autopilot();
+        seed.set(voyage_seed);
+        send(SimRequest::Replay { seed: voyage_seed, actions, edits });
+        autopilot_trained.set(false);
+        autopilot_replay.set(true);
+        view.set(View::Arena);
+        if let Ok(h) = set_interval_with_handle(
+            move || send(SimRequest::AgentStep { trained: false }),
             Duration::from_millis(AUTOPILOT_MS),
         ) {
             autopilot.set_value(Some(h));
@@ -642,7 +723,7 @@ pub fn App() -> impl IntoView {
         snapshot.with(|s| {
             let s = s.as_ref()?;
             let t = s.training.as_ref()?;
-            if t.policy.is_empty() {
+            if t.policy.is_empty() || s.replaying {
                 return None;
             }
             Some(match (v, &s.lesson) {
@@ -686,6 +767,31 @@ pub fn App() -> impl IntoView {
         experiments.set(Default::default());
         experiment_running.set(None);
         saved_key.set_value(None);
+        // This level's experiment log.
+        experiment_log.set(ExperimentLog::new(&id));
+        log_loaded.set_value(None);
+        selection.set(Selection::default());
+        reruns.set(Default::default());
+        compare_pending.set(None);
+        compare_episodes.set(
+            content::level(&id)
+                .and_then(|e| rl_envs::LevelDef::parse(e.level_source).ok())
+                .and_then(|d| d.budget.map(|b| b.episodes))
+                .unwrap_or(500),
+        );
+        {
+            let id = id.clone();
+            leptos::task::spawn_local(async move {
+                let saved = store::load(&ExperimentLog::storage_key(&id)).await;
+                if level_id.get_untracked() != id {
+                    return;
+                }
+                log_loaded.set_value(Some(id.clone()));
+                if let Some(log) = saved.and_then(|json| ExperimentLog::from_json(&id, &json)) {
+                    experiment_log.set(log);
+                }
+            });
+        }
         // The first load keeps the view from the URL; later level changes return to the arena.
         if !first_load.try_update_value(std::mem::take).unwrap_or(false) {
             view.update(|v| {
@@ -719,7 +825,12 @@ pub fn App() -> impl IntoView {
             start_autopilot(false);
         }
         if let Some(rewards) = pending_rewards.try_update_value(Option::take).flatten() {
-            send(SimRequest::Configure { config: QLearningConfig::default(), rewards, training_seed: 1 });
+            send(SimRequest::Configure {
+                config: QLearningConfig::default(),
+                rewards,
+                observation: None,
+                training_seed: 1,
+            });
         }
         if let Some(episodes) = pending_train.try_update_value(Option::take).flatten() {
             training.set(true);
@@ -840,6 +951,54 @@ pub fn App() -> impl IntoView {
             }
         })
     });
+    // A new experiment from the settings in CONFIGURE; the current raft is untouched.
+    let run_new_experiment = move || {
+        if compare_pending.with_untracked(Option::is_some) {
+            return;
+        }
+        let id = level_id.get_untracked();
+        let config = draft.with_untracked(|d| {
+            snapshot.with_untracked(|s| {
+                let status = s.as_ref()?.training.as_ref()?;
+                Some(d.as_ref()?.experiment(&id, status, compare_episodes.get_untracked()))
+            })
+        });
+        match config {
+            Some(Ok(config)) => {
+                compare_pending.set(Some(Pending::New { started_ms: now_ms() }));
+                send(SimRequest::Experiment { config: Box::new(config), adopt: false });
+            }
+            Some(Err(e)) => error.set(Some(e)),
+            None => {}
+        }
+    };
+    // A comparison task is settled by the log: check it whenever the log changes.
+    Effect::new(move |_| {
+        experiment_log.with(|log| {
+            let Some(def) = content::level(&log.level_id).and_then(|e| rl_envs::LevelDef::parse(e.level_source).ok())
+            else {
+                return;
+            };
+            let Some(goal) = def.challenge.map(|c| c.goal) else { return };
+            let mut newly = false;
+            progress.update(|p| newly = p.record_experiments(&goal, log, &def.observation));
+            if newly {
+                just_completed.set(true);
+            }
+        })
+    });
+    // The log is saved whenever it changes, once this level's saved log has been read.
+    Effect::new(move |_| {
+        experiment_log.with(|log| {
+            if log_loaded.get_value().as_deref() != Some(log.level_id.as_str()) {
+                return;
+            }
+            if let Ok(json) = serde_json::to_string(log) {
+                let key = ExperimentLog::storage_key(&log.level_id);
+                leptos::task::spawn_local(async move { store::save(&key, &json).await });
+            }
+        })
+    });
     let train_ctx = TrainCtx {
         snapshot,
         progress,
@@ -857,7 +1016,12 @@ pub fn App() -> impl IntoView {
             leptos::task::spawn_local(async move { store::forget(&id).await });
             deploy_report.set(None);
             sync_draft.set_value(true);
-            send(SimRequest::Configure { config: d.config, rewards: d.rewards, training_seed: d.training_seed });
+            send(SimRequest::Configure {
+                config: d.config,
+                rewards: d.rewards,
+                observation: d.observation,
+                training_seed: d.training_seed,
+            });
         }),
         train: Callback::new(move |episodes: u32| {
             training.set(true);
@@ -874,6 +1038,56 @@ pub fn App() -> impl IntoView {
             view.set(View::Arena);
             start_autopilot(true);
         }),
+        run_experiment: Callback::new(move |()| {
+            run_new_experiment();
+            view.set(View::Compare);
+        }),
+    };
+    let compare_ctx = CompareCtx {
+        snapshot,
+        log: experiment_log,
+        selection,
+        pending: compare_pending,
+        reruns,
+        draft,
+        episodes: compare_episodes,
+        highlights,
+        run: Callback::new(move |()| run_new_experiment()),
+        rerun: Callback::new(move |id: u32| {
+            let Some(config) = experiment_log.with_untracked(|l| l.get(id).map(|r| r.config.clone())) else { return };
+            reruns.update(|m| {
+                m.remove(&id);
+            });
+            compare_pending.set(Some(Pending::Rerun { id }));
+            send(SimRequest::Experiment { config: Box::new(config), adopt: false });
+        }),
+        adopt: Callback::new(move |id: u32| {
+            let Some(config) = experiment_log.with_untracked(|l| l.get(id).map(|r| r.config.clone())) else { return };
+            stop_autopilot();
+            training.set(false);
+            target.with_value(|t| t.cancel());
+            lesson_play.set(None);
+            compare_pending.set(Some(Pending::Adopt { id }));
+            send(SimRequest::Experiment { config: Box::new(config), adopt: true });
+        }),
+        remove: Callback::new(move |id: u32| {
+            experiment_log.update(|l| l.remove(id));
+            experiment_log.with_untracked(|l| selection.update(|s| s.retain_in(l)));
+            reruns.update(|m| {
+                m.remove(&id);
+            });
+        }),
+        watch: Callback::new(move |(id, k): (u32, usize)| {
+            let voyage = experiment_log.with_untracked(|l| {
+                let r = l.get(id)?;
+                let e = r.evaluation.episodes.get(k)?;
+                Some((e.played.seed, e.actions.clone(), r.config.edits.clone()))
+            });
+            if let Some((voyage_seed, actions, edits)) = voyage {
+                start_replay(voyage_seed, actions, edits);
+            }
+        }),
+        edit_settings: Callback::new(move |()| view.set(View::Configure)),
     };
     let trained =
         move || snapshot.with(|s| s.as_ref().and_then(|s| s.training.as_ref()).is_some_and(|t| t.episodes_trained > 0));
@@ -896,7 +1110,7 @@ pub fn App() -> impl IntoView {
     // The furthest tutorial step reached in this level: going back keeps the phases already shown.
     let reached = RwSignal::new((String::new(), 0usize));
     Effect::new(move |_| {
-        let (id, i) = (level_id.get(), tutorial_index.get());
+        let (id, i) = (level_id.get_untracked(), tutorial_index.get());
         reached.update(|r| *r = if r.0 == id { (id, r.1.max(i)) } else { (id, i) });
     });
     // A stage of phases is shown from the first step that points into it. A stage the tutorial
@@ -937,6 +1151,35 @@ pub fn App() -> impl IntoView {
             objective_open.set(true);
         }
     };
+    // The concept library opens a concept's explainer step in its level.
+    let library_ctx = LibraryCtx {
+        progress,
+        depth,
+        unlock_all,
+        replay: Callback::new(move |(i, step): (usize, usize)| {
+            if !can_open(i) {
+                return;
+            }
+            let id = LEVELS[i].id;
+            if level_id.get_untracked() == id {
+                tutorial_index.set(step);
+            } else {
+                pending_step.set_value(Some(step));
+                level_id.set(id.to_string());
+            }
+            view.set(View::Arena);
+        }),
+    };
+    // Reaching a tutorial step unlocks the concepts it teaches.
+    Effect::new(move |_| {
+        // Tracks the step only: the level loader always sets it, after the level changes.
+        let (id, i) = (level_id.get_untracked(), tutorial_index.get());
+        if progress.with_untracked(|p| p.reached.get(&id).is_none_or(|&r| i > r)) {
+            progress.update(|p| {
+                p.reach(&id, i);
+            });
+        }
+    });
     // The player's own fold choices, until the view changes. A tutorial
     // highlight inside a panel unfolds it.
     let fold_choice = RwSignal::new([None::<bool>; 3]);
@@ -1057,7 +1300,7 @@ pub fn App() -> impl IntoView {
             });
             match view.get_untracked() {
                 View::StyleSheet => render::draw_style_sheet(&ctx, now, fx),
-                View::Configure | View::Train | View::Analyse | View::Deploy => {}
+                View::Configure | View::Train | View::Analyse | View::Deploy | View::Compare | View::Library => {}
                 View::Walkthrough => lesson_model.with_untracked(|m| {
                     if let Some((model, _)) = m {
                         let policy = shown_policy.get_untracked();
@@ -1126,7 +1369,8 @@ pub fn App() -> impl IntoView {
         let step = tutorial.with_untracked(|t| t.as_ref().and_then(|t| t.steps.get(i).cloned()))?;
         let def = step.experiment()?.clone();
         let settings = experiment_settings(&def);
-        let spec = StoredValue::new(experiment_spec(&def));
+        let spec = StoredValue::new(experiment_spec(&level_id.get_untracked(), &def));
+        let title = step.title().to_string();
         let prediction = match &step {
             StepDef::Predict { question, options, answer, explain, .. } => {
                 Some((question.clone(), options.clone(), *answer, explain.clone()))
@@ -1141,8 +1385,15 @@ pub fn App() -> impl IntoView {
             training.set(false);
             target.with_value(|t| t.cancel());
             lesson_play.set(None);
-            experiment_running.set(Some(i));
-            send(SimRequest::Experiment(spec.get_value()));
+            match spec.get_value() {
+                Ok(config) => {
+                    experiment_running.set(Some(i));
+                    guided_label.set_value(Some(title.clone()));
+                    guided_started.set_value(now_ms());
+                    send(SimRequest::Experiment { config: Box::new(config), adopt: true });
+                }
+                Err(e) => error.set(Some(e)),
+            }
         };
         let prediction_view = prediction.map(|(question, options, answer, explain)| {
             let right = StoredValue::new(options[answer].clone());
@@ -1213,7 +1464,10 @@ pub fn App() -> impl IntoView {
                     </button>
                 </div>
                 <p class="subtitle">"Starts a new raft with these settings, replacing the current one."</p>
-                {move || result().map(|r| view! { <p class="result glow">{experiment_summary(&r)}</p> })}
+                {move || {
+                    let goal = snapshot.with(|s| s.as_ref().map(|s| s.goal_name.clone())).unwrap_or_default();
+                    result().map(|r| view! { <p class="result glow">{experiment_summary(&r, &goal)}</p> })
+                }}
             </div>
         })
     };
@@ -1259,6 +1513,13 @@ pub fn App() -> impl IntoView {
                 <span style="flex: 1"></span>
                 <button class:active=move || view.get() == View::Arena on:click=move |_| view.set(View::Arena)>
                     "ARENA"
+                </button>
+                <button
+                    class:active=move || view.get() == View::Library
+                    title="Every RL concept met so far"
+                    on:click=move |_| view.set(View::Library)
+                >
+                    "LIBRARY"
                 </button>
                 <button class:active=move || plain.get() on:click=move |_| plain.update(|p| *p = !*p)>
                     "PLAIN MODE"
@@ -1429,6 +1690,8 @@ pub fn App() -> impl IntoView {
                         View::Walkthrough => walkthrough_view(walk_ctx).into_any(),
                         View::Analyse => analyse_view(analyse_ctx).into_any(),
                         View::Deploy => deploy_view(train_ctx).into_any(),
+                        View::Compare => compare_view(compare_ctx).into_any(),
+                        View::Library => library_view(library_ctx).into_any(),
                         View::Arena | View::StyleSheet => ().into_any(),
                     }}
                 </div>
@@ -1494,12 +1757,12 @@ pub fn App() -> impl IntoView {
                             <span class="value">
                                 {hud(
                                     |s| match (s.state_index, s.state_count) {
-                                        (Some(i), Some(n)) => format!("cell {i} · ({}, {}) · {n} states", s.position.0, s.position.1),
-                                        _ => format!("({}, {})", s.position.0, s.position.1),
+                                        (Some(i), Some(n)) => format!("state {i} of {n} · {}", s.state_text),
+                                        _ => s.state_text.clone(),
                                     },
                                     |l, line| {
                                         let (i, c) = lesson_code::displayed_state(l, line);
-                                        format!("cell {i} · {}", lesson_code::cell(c))
+                                        format!("state {i} · raft {}", lesson_code::cell(c))
                                     },
                                 )}
                             </span>
@@ -1558,10 +1821,12 @@ pub fn App() -> impl IntoView {
                             <span class="label" class:hl=move || is_hl(UiElement::Episode)>"EPISODE"</span>
                             <span class="value">
                                 {hud(|s| {
+                                    let arrived = format!("reached {}", s.goal_name);
                                     let status = match s.outcome {
                                         Outcome::Sailing => "sailing",
-                                        Outcome::ReachedShore => "reached the shore",
+                                        Outcome::ReachedShore => arrived.as_str(),
                                         Outcome::Died => "swallowed by a whirlpool",
+                                        Outcome::Caught => "caught",
                                         Outcome::OutOfTime => "out of time",
                                     };
                                     let pilot = match s.sailed_by {
@@ -1569,6 +1834,7 @@ pub fn App() -> impl IntoView {
                                         SailedBy::Player => " · by you",
                                         SailedBy::RandomAgent => " · by the random agent",
                                         SailedBy::TrainedAgent => " · by the trained raft",
+                                        SailedBy::Replay => " · a recorded voyage",
                                     };
                                     format!("{} · {status}{pilot}", s.episode)
                                 },
@@ -1674,7 +1940,13 @@ pub fn App() -> impl IntoView {
                                     <p class="row subtitle">
                                         {move || {
                                             if autopilot_on.get() {
-                                                if autopilot_trained.get() { "the trained raft sails" } else { "the random agent sails" }
+                                                if autopilot_replay.get() {
+                                                    "a recorded voyage plays back"
+                                                } else if autopilot_trained.get() {
+                                                    "the trained raft sails"
+                                                } else {
+                                                    "the random agent sails"
+                                                }
                                             } else {
                                                 "steering is off · an agent sails"
                                             }
@@ -1720,6 +1992,7 @@ pub fn App() -> impl IntoView {
                     (View::Train, "TRAIN", UiElement::Train, "Train the raft and watch its learning curve"),
                     (View::Analyse, "ANALYSE", UiElement::Analyse, "Run batch experiments on the random agent"),
                     (View::Deploy, "DEPLOY", UiElement::Deploy, "Test the trained raft on fixed seeds"),
+                    (View::Compare, "COMPARE", UiElement::Compare, "Run experiments and compare them side by side"),
                 ]
                     .into_iter()
                     .map(|(v, label, el, about)| {

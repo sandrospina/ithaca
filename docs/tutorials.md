@@ -63,6 +63,9 @@ A reference section opened from the shell at any time.
 - Each entry has the three depths, a glossary, the level where it was taught, and "replay this explainer".
 - Each entry lists further reading: the matching Sutton & Barto chapter or the original paper.
 - Doubles as the project's `docs/rl-concepts.md` source, so documentation and game text are one source.
+- Built in Milestone 2: `content/concepts.ron` names, for each concept, the level and tutorial step that teaches it.
+  Reaching that step (or completing the level) unlocks it. A test checks every entry points at a real step and that
+  `docs/rl-concepts.md` is regenerated (`UPDATE_DOCS=1 cargo test -p rl-web concept_docs`).
 
 ## 5. Per-level tutorial content
 
@@ -90,7 +93,8 @@ A reference section opened from the shell at any time.
 
 - Each tutorial is a data file (Markdown for text + a RON/JSON step script) under `content/tutorials/<level>/`.
 - Steps can: show text at a depth, highlight a UI element, load a seeded scenario, set hyperparameters, run training for N episodes, ask a prediction or quiz question, and unlock a library entry.
-- Implemented so far: `Say` (text and highlights), `Predict` (the player picks an answer, then runs the experiment that settles it) and `Experiment` (a guided run with pinned settings). Each experiment lists `expect` bounds on its test-seed results, and `every_guided_experiment_shows_its_lesson` in `crates/rl-web/src/sim.rs` runs them all.
+- Implemented so far: `Say` (text and highlights), `Predict` (the player picks an answer, then runs the experiment that settles it) and `Experiment` (a guided run with pinned settings). Each experiment lists `expect` bounds on its test-seed results, and `every_guided_experiment_shows_its_lesson` in `crates/rl-web/src/sim.rs` runs them all. An experiment can pin the observation as well as α, γ, ε and rewards; it becomes an `ExperimentConfig` and is logged in COMPARE under its step's title.
+- `every_tutorial_points_at_what_its_level_has` (`crates/rl-web/src/content.rs`) walks every step and fails if it highlights something its level lacks, e.g. the reward editor in a level with fixed rewards.
 - No arbitrary code. The step vocabulary is a fixed enum, so tutorials stay safe and testable.
 - Writing tutorial text does not require recompiling the game. Translation can be added later.
 
@@ -116,7 +120,7 @@ Because classes are a target audience:
 |---|---|
 | 0 | Level 0 tutorial with the HUD labelling of the RL loop. Text-only beats. |
 | 1 | Tutorial engine: step script format, the seven beats, depth toggle, live Q-learning walkthrough. |
-| 2 | Headless tutorial tests in CI. Concept library. |
+| 2 | Headless tutorial tests in CI. Concept library. *(Done.)* |
 | 3–7 | One tutorial per level, written with the level. A level is not done until its tutorial passes CI. |
 | 7.5b | Teacher role, quizzes, progress view. |
 | 8+ | Deep-RL walkthrough grain: buffer, minibatch, gradient step, network sync. |

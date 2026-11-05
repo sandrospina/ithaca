@@ -101,46 +101,72 @@ An observation is an **ordered list of named feature extractors**. The Observati
 
 Each feature declares its size, so the total observation shape is known **before** training.
 
-**Tabular levels**: the feature list is turned into a discrete state index (product of feature cardinalities). The UI shows the resulting Q-table size, which is itself a teaching moment: adding the Cyclops' position multiplies the table by 25.
+**Tabular levels**: the feature list is turned into a discrete state index (product of feature cardinalities). The UI shows the resulting Q-table size, which is itself a teaching moment: adding the Cyclops' position multiplies the table by 49 on Level 3's 7×7 grid.
+
+Implemented so far (Level 3): `self_position(encoding)`, `agent_position(agent)` (another agent's cell), `agent_direction(agent)` (which way it lies: here or one of four compass sectors, 5 values) and `previous_action` (none or one of four, 5 values). Features name agents by their id; compiling resolves the names to indices, so the hot loop compares no strings.
 
 ## 4. Level file
 
 Level files are written in **RON** (readable, supports Rust enums). The coordinator and browser exchange the same structures as JSON. Both are produced by `serde` from one set of Rust types, with a schema version.
 
-Example: Level 3, The Cyclops' Cave.
+Example: Level 3, The Cyclops' Cave, as shipped in `content/levels/l03_cyclops_cave.ron`.
 
 ```ron
 Level(
   schema: 1,
   id: "l03_cyclops_cave",
+  title: "The Cyclops' Cave",
+  goal_name: "the cave mouth",
   engine: Grid(width: 7, height: 7, moves: Four),
   map: [
     "#######",
-    "#S....#",
-    "#.##..#",
-    "#..C..#",
-    "#.##..#",
+    "#S..C.#",
+    "#.###.#",
+    "#.###.#",
+    "#C###.#",
     "#....G#",
     "#######",
   ],
-  legend: { 'S': Spawn(agent: "odysseus"), 'C': Spawn(agent: "polyphemus"), 'G': Goal(term: "goal_reached") },
-  agents: {
-    "odysseus":   (controller: Learner, glyph: "agent"),
-    "polyphemus": (controller: Scripted(behaviour: chase_shortest_path(every_n_steps: 2)), glyph: "adversary"),
+  legend: {
+    'S': Spawn(agent: "odysseus"),
+    'C': Spawn(agent: "polyphemus"),
+    'G': Goal(term: "goal_reached"),
   },
-  reward: { "goal_reached": 10.0, "step": -0.1, "caught_by_opponent": -10.0 },
-  observation: [ self_position(encoding: Index) ],          // the deliberately inadequate default
+  agents: {
+    "odysseus": (controller: Learner, glyph: agent),
+    "polyphemus": (controller: Scripted(behaviour: chase_shortest_path(every_n_steps: 1)), glyph: adversary),
+  },
+  reward: { "goal_reached": 10.0, "step": -1.0, "caught_by_opponent": -10.0 },
+  reward_labels: {
+    "goal_reached": "escaping through the cave mouth",
+    "caught_by_opponent": "caught by Polyphemus",
+  },
+  // The deliberately inadequate default: the raft knows only where it is.
+  observation: [ self_position(encoding: Index) ],
   termination: [ GoalReached, CaughtByOpponent ],
-  truncation: (max_steps: 100),
+  truncation: (max_steps: 50),
   player_editable: (
-    observation: (allowed: [ self_position, entity_position(tag: "polyphemus"), entity_direction_coarse(tag: "polyphemus", sectors: 4), previous_action ]),
-    reward: (terms: [ "step", "caught_by_opponent" ], range: (-20.0, 20.0)),
+    observation: (allowed: [
+      self_position(encoding: Index),
+      agent_position(agent: "polyphemus"),
+      agent_direction(agent: "polyphemus"),
+      previous_action,
+    ]),
     hyperparameters: (alpha: (0.01, 1.0), gamma: (0.0, 0.999), epsilon: (0.0, 1.0)),
   ),
-  pilot: Agent,                                              // who steers: Player (by hand) or Agent
+  pilot: Agent,
   challenge: (
-    objective: "Escape the cave in 8 of 10 test voyages.",  // shown in the objective pop-over
-    goal: SuccessRate(threshold: 0.8, eval_episodes: 10, eval_seeds: Fixed(1000)),
+    objective: "Escape the cave in 8 of 10 test voyages, and show by experiment what the raft must see to do it.",
+    goal: Tasks([
+      CompareObservations(agent: "polyphemus", min_gain: 3),
+      TrainAgent(
+        threshold: 0.8,
+        eval_episodes: 10,
+        eval_seeds: Fixed(1000),
+        success: ReachGoal,
+        label: "escape the cave",
+      ),
+    ]),
   ),
   budget: (episodes: 2000, stars: [2000, 1000, 500]),
   tutorial: "l03_cyclops_cave",
@@ -148,6 +174,9 @@ Level(
 ```
 
 Key points:
+- **Agents** list learners first, then scripted agents. A scripted agent may have several spawn cells; each episode picks one from its seed. Learners are the world's external agents (`WorldSpec`, `JointAction`); scripted agents act inside `step`.
+- **`goal_name`** is how messages name the goal ("reached the cave mouth"); it defaults to "the shore".
+- **`CompareObservations`** is a task settled by the player's experiment log: two runs that differ only in whether the agent observes a given opponent, where seeing it wins at least `min_gain` more test episodes.
 - **`challenge`** pairs a one-sentence objective with a measurable goal. `BestReturn` goals compute their target from the map by shortest path, so the target can never drift out of date.
 - **Goals** are `BestReturn`, `SuccessRate`, or `Tasks([...])`: a checklist of `BatchRun`, `ReplayBestSeed`, `Quiz` and `TrainAgent` tasks. Quiz questions use a fixed set of kinds (`StatBand`, `BestSeed`, `Choice`) whose correct answers are computed from the player's own batch, so a level can test understanding without hard-coding numbers.
 - **`pilot`** says whether the player steers by hand or an agent steers while the player configures and watches.
@@ -215,7 +244,7 @@ Levels 14–16 share one **Ithaca arena spec**, as required for the Level 16 dat
 | 0 | `World` trait (multi-agent shape), Grid engine, `LevelDef` with map + spawn + goal, RON loading, validation, compile step. Level 0 is a data file from day one. |
 | 1 | Reward terms and observation features as catalogues, even if only two of each exist. |
 | 3 (Level 2) | Hazards, lures, reward editor writes `reward` weights. |
-| 4 (Level 3) | Scripted behaviours as `PolicyProvider`s. Observation Builder writes `observation`. Spec hashes on policies. |
+| 4 (Level 3) | Scripted behaviours as `PolicyProvider`s. Observation Builder writes `observation`. Spec hashes on policies. *Done: `chase_shortest_path`, learners first then scripted agents, spawn cells picked by the seed, the `caught_by_opponent` term and termination, `PlayerEdits` checked in `crates/rl-envs/src/edits.rs`.* |
 | 5–7 | Wind, darkness, sensors, beacons, frame stacking. |
 | Before 8 | Sea engine in fixed point. Re-express one grid level in the Sea engine as a regression test. |
 | 14 (Level 12) | Generators with parameter distributions. |

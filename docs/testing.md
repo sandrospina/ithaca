@@ -52,7 +52,14 @@ window at least about 1200 × 800.
    - DEPLOY: the trained raft takes the shortest route.
    - Reload the page: the trained raft comes back ("your saved raft is back").
 4. **Level 2**: a reward edit in CONFIGURE changes what the trained raft does.
-5. **Plain mode** (top right): the scanlines and glow go away and everything stays readable.
+5. **Level 3**:
+   - The first guided experiment (a raft that sees only itself) fails; WATCH TRAINED RAFT shows it caught.
+   - The prediction's experiment (it also sees which way Polyphemus is) escapes on every test voyage.
+   - COMPARE: both runs are in the log; tick them, read the chart and the table, WATCH a test voyage, RERUN one
+     (it must say "reproduced exactly").
+   - CONFIGURE: ticking features in the Observation Builder changes the Q-table size; APPLY, train and DEPLOY.
+6. **LIBRARY** (top right): concepts open as tutorials reach them; REPLAY THE EXPLAINER returns to the step.
+7. **Plain mode** (top right): the scanlines and glow go away and everything stays readable.
 
 Shortcuts for testers:
 

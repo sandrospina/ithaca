@@ -3,18 +3,22 @@
 
 use rl_agents::{GreedyPolicy, QLearner, QLearningConfig, RandomAgent};
 use rl_core::{ActionSpace, PolicyProvider, Rng, StepEvent, World};
-use rl_envs::catalogue::RewardTerm;
-use rl_envs::{EvalSeeds, GoalDef, GridWorld, MAX_BATCH_EPISODES, Pilot, SuccessDef, TaskDef};
+use rl_envs::level::{Encoding, FeatureDef};
+use rl_envs::{EditMode, EvalSeeds, GoalDef, GridWorld, MAX_BATCH_EPISODES, Pilot, PlayerEdits, TaskDef};
 use rl_training::{
-    BatchEpisode, BatchReport, EpisodeOutcome, PlayedEpisode, TrainingEpisode, play_episode, train_episode,
+    BatchEpisode, BatchReport, ExperimentConfig, PlayedEpisode, QLearningBounds, TabularTrainer, TrainingEpisode,
+    play_episode, tabular_states,
 };
 
 use crate::content;
 use crate::protocol::{
-    Baseline, BestRoute, CellPolicy, ConfigBounds, DeployReport, ExperimentResult, ExperimentSpec, LessonMode,
-    LessonMove, LessonState, Objective, Outcome, RewardSetting, SAVE_SCHEMA, SailedBy, SavedRaft, SimRequest,
+    Baseline, BestRoute, CellPolicy, DeployReport, ExperimentResult, FeatureOption, LessonMode, LessonMove,
+    LessonState, Objective, ObservationStatus, Outcome, RewardSetting, SAVE_SCHEMA, SailedBy, SavedRaft, SimRequest,
     SimResponse, Snapshot, TaskResult, TrainingStatus,
 };
+
+pub use rl_envs::level_hash;
+pub use rl_training::{agent_rng, succeeded};
 
 /// Episodes used to measure the random agent's baseline on a level.
 pub const BASELINE_EPISODES: u32 = 100;
@@ -22,52 +26,72 @@ pub const BASELINE_EPISODES: u32 = 100;
 /// Largest training chunk per request, so the UI stays responsive.
 pub const MAX_TRAIN_CHUNK: u32 = 500;
 
-/// An agent's own random stream for an episode. Live play, batch runs and
-/// deployment all use it, so any seed replays exactly.
-pub fn agent_rng(seed: u64) -> Rng {
-    Rng::new(seed).fork(0x5241_4654) // "RAFT"
-}
-
 /// Plays one full episode with the random agent on `seed`.
 pub fn random_episode(world: &mut GridWorld, seed: u64) -> BatchEpisode {
     play_episode(world, &mut RandomAgent, seed, &mut agent_rng(seed)).to_batch()
 }
 
-/// Whether a test voyage counts as a success for a training task.
-pub fn succeeded(def: SuccessDef, e: &PlayedEpisode, best_return: Option<f32>) -> bool {
-    match def {
-        SuccessDef::ReachGoal => e.outcome == EpisodeOutcome::ReachedGoal,
-        SuccessDef::ShortestRoute => {
-            e.outcome == EpisodeOutcome::ReachedGoal && best_return.is_some_and(|b| e.episode_return >= b - 1e-4)
-        }
-        SuccessDef::SafeArrival => e.outcome == EpisodeOutcome::ReachedGoal && e.hazard_steps == 0,
-        SuccessDef::StuckOnLure => e.outcome == EpisodeOutcome::OutOfTime && e.lure_steps * 2 >= e.length,
-        SuccessDef::Dies => e.outcome == EpisodeOutcome::Died,
-    }
-}
-
-/// FNV-1a hash of a level file, so a saved raft is never loaded into a
-/// level that has changed since it was trained.
-pub fn level_hash(source: &str) -> u64 {
-    source.bytes().fold(0xcbf2_9ce4_8422_2325, |h, b| (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3))
-}
-
-/// Test seeds used when a level has no training task: ten seeds from 1000.
-const DEFAULT_TEST_SEEDS: (u64, u32) = (1000, 10);
-
-/// The simulation request for a tutorial's guided experiment.
-pub fn experiment_spec(def: &rl_tutorial::ExperimentDef) -> ExperimentSpec {
+/// The specification of a tutorial's guided experiment on `level_id`.
+pub fn experiment_spec(level_id: &str, def: &rl_tutorial::ExperimentDef) -> Result<ExperimentConfig, String> {
+    let entry = content::level(level_id).ok_or_else(|| format!("unknown level \"{level_id}\""))?;
     let d = QLearningConfig::default();
-    ExperimentSpec {
-        config: QLearningConfig {
-            alpha: def.alpha.unwrap_or(d.alpha),
-            gamma: def.gamma.unwrap_or(d.gamma),
-            epsilon: def.epsilon.unwrap_or(d.epsilon),
-        },
+    let config = QLearningConfig {
+        alpha: def.alpha.unwrap_or(d.alpha),
+        gamma: def.gamma.unwrap_or(d.gamma),
+        epsilon: def.epsilon.unwrap_or(d.epsilon),
+    };
+    let edits = PlayerEdits {
         rewards: def.rewards.iter().map(|(k, v)| (k.clone(), *v)).collect(),
-        training_seed: def.training_seed,
-        episodes: def.episodes,
+        observation: def.observation.clone(),
+    };
+    ExperimentConfig::q_learning(level_id, entry.level_source, edits, config, def.training_seed, def.episodes)
+        .map_err(|e| errors_text(&e))
+}
+
+use crate::experiments::display_name;
+
+/// What the raft observes, in words: "raft (1, 1) · Polyphemus to the east".
+pub fn describe_state(world: &GridWorld) -> String {
+    let g = world.grid();
+    let obs = world.observe(0);
+    let cells = (g.width * g.height) as usize;
+    let cell = |v: f32| {
+        let i = v as i32;
+        format!("({}, {})", i % g.width, i / g.width)
+    };
+    let mut at = 0;
+    let mut parts = Vec::new();
+    for f in &g.features {
+        let take = match f {
+            FeatureDef::SelfPosition { encoding: Encoding::Normalised } => 2,
+            FeatureDef::SelfPosition { encoding: Encoding::OneHot } => cells,
+            _ => 1,
+        };
+        let values = &obs.features[at..at + take];
+        at += take;
+        parts.push(match f {
+            FeatureDef::SelfPosition { encoding: Encoding::Index } => format!("raft {}", cell(values[0])),
+            FeatureDef::SelfPosition { .. } => {
+                let (x, y) = world.position(0);
+                format!("raft ({x}, {y})")
+            }
+            FeatureDef::AgentPosition { agent } => format!("{} {}", display_name(agent), cell(values[0])),
+            FeatureDef::AgentDirection { agent } => {
+                let way = ["here", "to the north", "to the east", "to the south", "to the west"];
+                format!("{} {}", display_name(agent), way[values[0] as usize % 5])
+            }
+            FeatureDef::PreviousAction => {
+                let moves = ["none yet", "north", "east", "south", "west"];
+                format!("last move {}", moves[values[0] as usize % 5])
+            }
+        });
     }
+    parts.join(" · ")
+}
+
+/// Level errors as one line for the player.
+pub fn errors_text(errors: &[rl_envs::LevelError]) -> String {
+    errors.iter().map(ToString::to_string).collect::<Vec<_>>().join(" · ")
 }
 
 /// The share of test voyages an experiment measure counts, if the map defines it.
@@ -84,14 +108,32 @@ pub fn stars(episodes_trained: u32, thresholds: &[u32]) -> u32 {
     thresholds.iter().filter(|&&t| episodes_trained <= t).count() as u32
 }
 
-/// The trained agent and how it was set up.
+/// The trained agent, and the walkthrough episode if one is open.
 #[derive(Clone)]
 struct Trainer {
-    learner: QLearner,
-    training_seed: u64,
-    rng: Rng,
-    curve: Vec<BatchEpisode>,
+    core: TabularTrainer,
     lesson: Option<Lesson>,
+}
+
+impl std::ops::Deref for Trainer {
+    type Target = TabularTrainer;
+    fn deref(&self) -> &TabularTrainer {
+        &self.core
+    }
+}
+
+impl std::ops::DerefMut for Trainer {
+    fn deref_mut(&mut self) -> &mut TabularTrainer {
+        &mut self.core
+    }
+}
+
+/// A recorded voyage being played back on the arena, in its own world.
+#[derive(Clone)]
+struct Replay {
+    world: GridWorld,
+    actions: Vec<u32>,
+    next: usize,
 }
 
 /// A training episode played move by move for the walkthrough.
@@ -113,15 +155,11 @@ impl Lesson {
 }
 
 impl Trainer {
-    fn seed_for(&self, episode_index: u32) -> u64 {
-        self.training_seed.wrapping_add(u64::from(episode_index))
-    }
-
     /// One walkthrough move. Records the episode on the learning curve when it ends.
     fn lesson_move(&mut self) {
         let lesson = self.lesson.as_mut().expect("a lesson episode is under way");
         let from = lesson.world.position(0);
-        let trace = lesson.episode.step(&mut lesson.world, &mut self.learner, &mut self.rng);
+        let trace = lesson.episode.step(&mut lesson.world, &mut self.core.learner, &mut self.core.rng);
         let ActionSpace::Discrete { labels, .. } = &lesson.world.spec().agents[0].action;
         lesson.last = Some(LessonMove {
             action_label: labels.get(trace.action as usize).cloned().unwrap_or_default(),
@@ -130,7 +168,7 @@ impl Trainer {
             trace,
         });
         if let Some(done) = lesson.episode.finished() {
-            self.curve.push(done.to_batch());
+            self.core.curve.push(done.to_batch());
         }
     }
 
@@ -148,7 +186,9 @@ impl Trainer {
 pub struct SimCore {
     level_id: String,
     level_hash: u64,
+    level_source: &'static str,
     world: Option<GridWorld>,
+    replay: Option<Replay>,
     objective: Option<Objective>,
     random_baseline: Option<Baseline>,
     trainer: Option<Trainer>,
@@ -192,6 +232,7 @@ impl SimCore {
                     self.step(action, SailedBy::Player);
                 }
             }
+            SimRequest::AgentStep { .. } if self.replay.is_some() => self.replay_step(),
             SimRequest::AgentStep { trained } => {
                 let Some(world) = &self.world else { return no_level() };
                 if world.grid().pilot == Pilot::Player {
@@ -209,11 +250,11 @@ impl SimCore {
                     self.step(action.discrete(), by);
                 }
             }
-            SimRequest::Configure { config, rewards, training_seed } => {
+            SimRequest::Configure { config, rewards, observation, training_seed } => {
                 if self.world.is_none() {
                     return no_level();
                 }
-                if let Err(e) = self.configure(config, &rewards, training_seed) {
+                if let Err(e) = self.configure(config, PlayerEdits { rewards, observation }, training_seed) {
                     return SimResponse::Error(e);
                 }
                 let seed = self.seed;
@@ -237,7 +278,18 @@ impl SimCore {
                 }
                 return SimResponse::Lesson(Box::new(self.snapshot()));
             }
-            SimRequest::Experiment(spec) => return self.experiment(&spec),
+            SimRequest::Experiment { config, adopt } => return self.experiment(&config, adopt),
+            SimRequest::Replay { seed, actions, edits } => {
+                let Some(world) = &self.world else { return no_level() };
+                let mut world = world.clone();
+                if let Err(e) = world.apply_edits(&edits, EditMode::Strict) {
+                    return SimResponse::Error(errors_text(&e));
+                }
+                self.reset(seed);
+                world.reset(seed);
+                self.replay = Some(Replay { world, actions, next: 0 });
+                self.log = vec![format!("a recorded voyage · seed {seed} · played back from its action log")];
+            }
             SimRequest::Export => {
                 return match self.export() {
                     Some(save) => SimResponse::Export(Box::new(save)),
@@ -274,53 +326,19 @@ impl SimCore {
         }
     }
 
-    fn bounds(world: &GridWorld) -> ConfigBounds {
-        let h = world.grid().player_editable.hyperparameters;
-        ConfigBounds {
-            alpha: h.and_then(|h| h.alpha).unwrap_or((0.01, 1.0)),
-            gamma: h.and_then(|h| h.gamma).unwrap_or((0.0, 0.999)),
-            epsilon: h.and_then(|h| h.epsilon).unwrap_or((0.0, 1.0)),
-        }
-    }
-
     fn new_trainer(world: &GridWorld, config: QLearningConfig, training_seed: u64) -> Option<Trainer> {
         if world.grid().pilot != Pilot::Agent {
             return None;
         }
-        let states = world.spec().agents[0].observation.state_count()? as u32;
-        let b = Self::bounds(world);
-        let clamp = |v: f32, (lo, hi): (f32, f32)| if v.is_finite() { v.clamp(lo, hi) } else { lo };
-        let config = QLearningConfig {
-            alpha: clamp(config.alpha, b.alpha),
-            gamma: clamp(config.gamma, b.gamma),
-            epsilon: clamp(config.epsilon, b.epsilon),
-        };
-        Some(Trainer {
-            learner: QLearner::new(states, 4, config),
-            training_seed,
-            rng: Rng::new(training_seed),
-            curve: Vec::new(),
-            lesson: None,
-        })
+        let states = tabular_states(world)?;
+        let config = QLearningBounds::of(world).clamp(config);
+        Some(Trainer { core: TabularTrainer::new(states, 4, config, training_seed), lesson: None })
     }
 
-    /// Applies reward edits within the level's bounds and starts a fresh agent.
-    fn configure(
-        &mut self,
-        config: QLearningConfig,
-        rewards: &[(String, f32)],
-        training_seed: u64,
-    ) -> Result<(), String> {
+    /// Applies edits within the level's bounds and starts a fresh agent.
+    fn configure(&mut self, config: QLearningConfig, edits: PlayerEdits, training_seed: u64) -> Result<(), String> {
         let world = self.world.as_mut().expect("checked");
-        let edit = world.grid().player_editable.reward.clone();
-        for (name, weight) in rewards {
-            let term = RewardTerm::from_name(name).ok_or_else(|| format!("unknown reward term \"{name}\""))?;
-            let Some(edit) = &edit else { continue };
-            if !edit.terms.iter().any(|t| t == name) || !weight.is_finite() {
-                continue;
-            }
-            world.set_reward_weight(term, weight.clamp(edit.range.0, edit.range.1));
-        }
+        world.apply_edits(&edits, EditMode::Clamp).map_err(|e| errors_text(&e))?;
         self.trainer = Self::new_trainer(world, config, training_seed);
         if self.trainer.is_none() {
             return Err("this level has no trainable agent".into());
@@ -345,12 +363,7 @@ impl SimCore {
             return Err("the training budget is used up · start a new raft to train again".into());
         }
         // Train on a copy, so the live episode on screen is untouched.
-        let mut probe = world.clone();
-        for i in 0..allowed {
-            let seed = trainer.seed_for(done + i);
-            let e = train_episode(&mut probe, &mut trainer.learner, seed, &mut trainer.rng);
-            trainer.curve.push(e.to_batch());
-        }
+        trainer.core.train(&mut world.clone(), allowed);
         Ok(())
     }
 
@@ -391,67 +404,34 @@ impl SimCore {
         Ok(())
     }
 
-    /// Test seeds for this level: those of its first training task.
-    fn test_seeds(&self) -> (u64, u32) {
-        match self.objective.as_ref().map(|o| &o.goal) {
-            Some(GoalDef::Tasks(tasks)) => tasks
-                .iter()
-                .find_map(|t| match t {
-                    TaskDef::TrainAgent { eval_episodes, eval_seeds: EvalSeeds::Fixed(first), .. } => {
-                        Some((*first, *eval_episodes))
-                    }
-                    _ => None,
-                })
-                .unwrap_or(DEFAULT_TEST_SEEDS),
-            _ => DEFAULT_TEST_SEEDS,
-        }
-    }
-
-    /// A guided experiment: a new raft with pinned settings, trained, then
-    /// tested greedily on the level's test seeds.
-    fn experiment(&mut self, spec: &ExperimentSpec) -> SimResponse {
+    /// Runs an experiment. With `adopt`, its raft and its edits become the
+    /// current ones, as if the player had trained it.
+    fn experiment(&mut self, config: &ExperimentConfig, adopt: bool) -> SimResponse {
         if self.world.is_none() {
             return no_level();
         }
-        if let Err(e) = self.configure(spec.config, &spec.rewards, spec.training_seed) {
-            return SimResponse::Error(e);
+        if config.level.id != self.level_id {
+            return SimResponse::Error(format!("this experiment is for another level: \"{}\"", config.level.id));
         }
-        let mut left = spec.episodes;
-        while left > 0 {
-            let before = self.trainer.as_ref().map_or(0, |t| t.curve.len());
-            if let Err(e) = self.train(left.min(MAX_TRAIN_CHUNK)) {
-                return SimResponse::Error(e);
-            }
-            let trained = self.trainer.as_ref().map_or(0, |t| t.curve.len()) - before;
-            if trained == 0 {
-                break;
-            }
-            left = left.saturating_sub(trained as u32);
-        }
-        let world = self.world.as_ref().expect("checked");
-        let trainer = self.trainer.as_ref().expect("configured");
-        let best_return = world.grid().best_return(0).map(|(r, _)| r);
-        let (first, count) = self.test_seeds();
-        let mut probe = world.clone();
-        let played: Vec<PlayedEpisode> = (0..u64::from(count))
-            .map(|k| {
-                let seed = first.wrapping_add(k);
-                play_episode(&mut probe, &mut GreedyPolicy(&trainer.learner.table), seed, &mut agent_rng(seed))
-            })
-            .collect();
-        let count_of = |def: SuccessDef| played.iter().filter(|e| succeeded(def, e, best_return)).count() as u32;
-        let n = played.len().max(1) as f32;
-        let result = ExperimentResult {
-            episodes_trained: trainer.curve.len() as u32,
-            tested: played.len() as u32,
-            reached: count_of(SuccessDef::ReachGoal),
-            shortest: best_return.map(|_| count_of(SuccessDef::ShortestRoute)),
-            mean_return: played.iter().map(|e| e.episode_return).sum::<f32>() / n,
-            mean_length: played.iter().map(|e| e.length as f32).sum::<f32>() / n,
+        let mut prepared = match config.start(self.level_source) {
+            Ok(p) => p,
+            Err(e) => return SimResponse::Error(errors_text(&e)),
         };
+        let run = prepared.run();
+        if adopt {
+            let world = self.world.as_mut().expect("checked");
+            if let Err(e) = world.apply_edits(&config.edits, EditMode::Strict) {
+                return SimResponse::Error(errors_text(&e));
+            }
+            self.trainer = Some(Trainer { core: prepared.trainer, lesson: None });
+        }
         let seed = self.seed;
         self.reset(seed);
-        SimResponse::Experiment { result, snapshot: Box::new(self.snapshot()) }
+        SimResponse::Experiment {
+            result: ExperimentResult::of(&run),
+            run: Box::new(run),
+            snapshot: Box::new(self.snapshot()),
+        }
     }
 
     /// The current raft, as of its last finished episode.
@@ -461,6 +441,7 @@ impl SimCore {
             Some(l) if l.in_progress() => (l.checkpoint.0.clone(), l.checkpoint.1.clone()),
             _ => (t.learner.clone(), t.rng.clone()),
         };
+        let world = self.world.as_ref()?;
         Some(SavedRaft {
             schema: SAVE_SCHEMA,
             level_id: self.level_id.clone(),
@@ -470,6 +451,8 @@ impl SimCore {
             learner,
             rng,
             curve: t.curve.clone(),
+            observation: Some(world.grid().features.clone()),
+            spec_hash: Some(world.spec().agents[0].spec_hash()),
         })
     }
 
@@ -482,7 +465,15 @@ impl SimCore {
         if self.trainer.as_ref().is_some_and(|t| !t.curve.is_empty() || t.lesson.is_some()) {
             return Err("a raft is already training · the saved raft was not loaded".into());
         }
-        self.configure(save.learner.config, &save.rewards, save.training_seed)?;
+        let edits = PlayerEdits { rewards: save.rewards.clone(), observation: save.observation.clone() };
+        self.configure(save.learner.config, edits, save.training_seed)?;
+        let world = self.world.as_ref().expect("checked");
+        if let Some(saved) = save.spec_hash
+            && saved != world.spec().agents[0].spec_hash()
+        {
+            self.trainer = Self::new_trainer(world, QLearningConfig::default(), 1);
+            return Err("the saved raft was trained to observe a different world · it was not loaded".into());
+        }
         let trainer = self.trainer.as_mut().expect("configured");
         let fits = trainer.learner.config == save.learner.config
             && trainer.learner.table.states == save.learner.table.states
@@ -491,9 +482,9 @@ impl SimCore {
             self.trainer = Self::new_trainer(self.world.as_ref().expect("checked"), QLearningConfig::default(), 1);
             return Err("the saved raft does not fit this level's settings".into());
         }
-        trainer.learner = save.learner;
-        trainer.rng = save.rng;
-        trainer.curve = save.curve;
+        trainer.core.learner = save.learner;
+        trainer.core.rng = save.rng;
+        trainer.core.curve = save.curve;
         self.log = vec![format!("your saved raft is back · {} training episodes", trainer.curve.len())];
         Ok(())
     }
@@ -506,7 +497,7 @@ impl SimCore {
         let Some(GoalDef::Tasks(tasks)) = self.objective.as_ref().map(|o| &o.goal) else {
             return SimResponse::Error("this level has no training tasks".into());
         };
-        let best_return = world.grid().best_return(0).map(|(r, _)| r);
+        let best_return = rl_training::shortest_route_return(world);
         let mut probe = world.clone();
         let mut voyages = None;
         let mut results = Vec::new();
@@ -562,6 +553,7 @@ impl SimCore {
         let entry = content::level(level_id).ok_or_else(|| format!("unknown level \"{level_id}\""))?;
         let world = rl_envs::load_world(entry.level_source).map_err(|e| format!("{level_id}: {e}"))?;
         self.level_hash = level_hash(entry.level_source);
+        self.level_source = entry.level_source;
         let grid = world.grid();
         let best_route = grid.best_return(0).map(|(episode_return, moves)| BestRoute { episode_return, moves });
         self.objective =
@@ -586,6 +578,7 @@ impl SimCore {
     }
 
     fn reset(&mut self, seed: u64) {
+        self.replay = None;
         let world = self.world.as_mut().expect("checked");
         world.reset(seed);
         self.policy_rng = Some(agent_rng(seed));
@@ -599,8 +592,28 @@ impl SimCore {
         self.log = vec![format!("episode {} begins · seed {seed}", self.episode)];
     }
 
+    /// The next action of a recorded voyage.
+    fn replay_step(&mut self) {
+        let replay = self.replay.as_mut().expect("checked");
+        match replay.actions.get(replay.next).copied() {
+            Some(action) => {
+                replay.next += 1;
+                self.step(action, SailedBy::Replay);
+            }
+            None => self.log = vec!["the recorded voyage is over".into()],
+        }
+    }
+
+    /// The world on the arena: a recorded voyage's while one plays, else the live one.
+    fn shown_world(&self) -> &GridWorld {
+        self.replay.as_ref().map_or_else(|| self.world.as_ref().expect("checked"), |r| &r.world)
+    }
+
     fn step(&mut self, action: u32, by: SailedBy) {
-        let world = self.world.as_mut().expect("checked");
+        let world = match &mut self.replay {
+            Some(r) => &mut r.world,
+            None => self.world.as_mut().expect("checked"),
+        };
         if world.is_done() {
             self.log = vec!["the episode is over · press R to sail again".into()];
             return;
@@ -610,12 +623,17 @@ impl SimCore {
         let result = world.step(&vec![rl_core::Action::Discrete(action)]);
         let r = &result.agents[0];
         let died = result.info.events.iter().any(|e| matches!(e, StepEvent::Died { .. }));
+        let caught = result.info.events.iter().any(|e| matches!(e, StepEvent::Caught { agent: 0, .. }));
+        let names: Vec<String> = world.grid().agent_names.iter().map(|n| display_name(n)).collect();
+        let goal = world.grid().goal_name.clone();
         self.sailed_by = Some(by);
         self.last_action = label.clone();
         self.last_reward = Some(r.reward);
         self.episode_return += r.reward;
         self.outcome = Some(if died {
             Outcome::Died
+        } else if caught {
+            Outcome::Caught
         } else if r.terminated {
             Outcome::ReachedShore
         } else if r.truncated {
@@ -627,19 +645,22 @@ impl SimCore {
         match by {
             SailedBy::RandomAgent => self.log.push(format!("random agent chose {}", label.unwrap_or_default())),
             SailedBy::TrainedAgent => self.log.push(format!("trained raft chose {}", label.unwrap_or_default())),
+            SailedBy::Replay => self.log.push(format!("recorded move: {}", label.unwrap_or_default())),
             _ => {}
         }
         self.log.extend(result.info.events.iter().map(|e| match e {
-            StepEvent::Moved { to, .. } => format!("moved to ({}, {})", to.0, to.1),
+            StepEvent::Moved { agent: 0, to, .. } => format!("moved to ({}, {})", to.0, to.1),
+            StepEvent::Moved { agent, to, .. } => format!("{} moves to ({}, {})", names[*agent], to.0, to.1),
+            StepEvent::Caught { by, .. } => format!("caught by {}", names[*by]),
             StepEvent::BumpedWall { .. } => "bumped into the edge · the move is wasted".into(),
-            StepEvent::GoalReached { .. } => "reached the shore".into(),
+            StepEvent::GoalReached { .. } => format!("reached {goal}"),
             StepEvent::Died { .. } => "swallowed by a whirlpool".into(),
             StepEvent::OnHazard { .. } => "scraped the rocks".into(),
             StepEvent::OnLure { .. } => "drifting among the lotus".into(),
             StepEvent::Reward { term, value, .. } => format!("reward {value:+} ({term})"),
         }));
         match self.outcome {
-            Some(Outcome::ReachedShore | Outcome::Died) => {
+            Some(Outcome::ReachedShore | Outcome::Died | Outcome::Caught) => {
                 self.log.push(format!("episode over · return {}", self.episode_return))
             }
             Some(Outcome::OutOfTime) => self.log.push("out of time · the episode is truncated".into()),
@@ -651,24 +672,22 @@ impl SimCore {
         let world = self.world.as_ref()?;
         let t = self.trainer.as_ref()?;
         let g = world.grid();
+        // The arrows show what the raft would do in each cell, with everything
+        // else it observes as it is now: in the walkthrough's world while one is open.
+        let seen = t.lesson.as_ref().map_or_else(|| self.shown_world(), |l| &l.world);
         let cells = (g.width * g.height) as u32;
-        let policy = if t.learner.table.states == cells {
-            (0..cells)
-                .filter(|&i| !g.walls[i as usize])
-                .map(|i| {
-                    let row = t.learner.table.row(i);
-                    CellPolicy {
-                        cell: ((i as i32) % g.width, (i as i32) / g.width),
-                        values: [row[0], row[1], row[2], row[3]],
-                    }
-                })
-                .collect()
-        } else {
-            Vec::new()
-        };
+        let policy = (0..cells)
+            .filter(|&i| !g.walls[i as usize])
+            .filter_map(|i| {
+                let cell = ((i as i32) % g.width, (i as i32) / g.width);
+                let state = seen.observe_at(0, cell).state_index.filter(|&s| s < t.learner.table.states)?;
+                let row = t.learner.table.row(state);
+                Some(CellPolicy { cell, values: [row[0], row[1], row[2], row[3]] })
+            })
+            .collect();
         Some(TrainingStatus {
             config: t.learner.config,
-            bounds: Self::bounds(world),
+            bounds: QLearningBounds::of(world),
             rewards: self.reward_settings(),
             reward_range: g.player_editable.reward.as_ref().map(|r| r.range),
             training_seed: t.training_seed,
@@ -677,16 +696,29 @@ impl SimCore {
             table_size: t.learner.table.states * t.learner.table.actions,
             curve: t.curve.clone(),
             policy,
+            observation: g.player_editable.observation.as_ref().map(|edit| ObservationStatus {
+                features: g.features.clone(),
+                allowed: edit
+                    .allowed
+                    .iter()
+                    .map(|f| FeatureOption {
+                        feature: f.clone(),
+                        name: f.name(),
+                        cardinality: g.feature_cardinality(f).unwrap_or(1),
+                    })
+                    .collect(),
+            }),
         })
     }
 
     fn snapshot(&self) -> Snapshot {
-        let world = self.world.as_ref().expect("snapshot requires a world");
+        let world = self.shown_world();
         let spec = &world.spec().agents[0];
         let g = world.grid();
         Snapshot {
             level_id: self.level_id.clone(),
             title: g.title.clone(),
+            goal_name: g.goal_name.clone(),
             render: world.render_model(),
             pilot: g.pilot,
             objective: self.objective.clone(),
@@ -700,6 +732,7 @@ impl SimCore {
             max_steps: g.max_steps,
             position: world.position(0),
             state_index: world.observe(0).state_index,
+            state_text: describe_state(world),
             state_count: spec.observation.state_count(),
             last_action: self.last_action.clone(),
             last_reward: self.last_reward,
@@ -707,6 +740,7 @@ impl SimCore {
             outcome: self.outcome.unwrap_or(Outcome::Sailing),
             log: self.log.clone(),
             lesson: self.lesson_state(),
+            replaying: self.replay.is_some(),
         }
     }
 
@@ -724,6 +758,7 @@ impl SimCore {
             cell: w.position(0),
             last: lesson.last.clone(),
             finished: lesson.episode.finished(),
+            goal_name: w.grid().goal_name.clone(),
         })
     }
 }
@@ -826,6 +861,7 @@ mod tests {
         snap(sim.handle(SimRequest::Configure {
             config: QLearningConfig::default(),
             rewards: rewards.iter().map(|(n, w)| (n.to_string(), *w)).collect(),
+            observation: None,
             training_seed: 1,
         }))
     }
@@ -906,6 +942,35 @@ mod tests {
         let report = deploy(&mut sim);
         let passed: Vec<usize> = report.tasks.iter().filter(|t| t.passed).map(|t| t.task).collect();
         assert_eq!(passed, vec![1], "only the lotus-eater task: {report:?}");
+    }
+
+    #[test]
+    fn level_three_is_won_by_a_raft_that_sees_polyphemus() {
+        use rl_envs::level::{Encoding, FeatureDef};
+        let mut sim = SimCore::default();
+        let s = load(&mut sim, "l03_cyclops_cave");
+        let o = s.training.unwrap().observation.expect("the Observation Builder is open here");
+        assert_eq!((o.rows(), o.allowed.len()), (49, 4));
+        train(&mut sim, 1000);
+        let blind = deploy(&mut sim);
+        assert!(!blind.tasks[0].passed, "position only: {blind:?}");
+
+        let eyes = vec![
+            FeatureDef::SelfPosition { encoding: Encoding::Index },
+            FeatureDef::AgentDirection { agent: "polyphemus".into() },
+        ];
+        let s = snap(sim.handle(SimRequest::Configure {
+            config: QLearningConfig::default(),
+            rewards: vec![],
+            observation: Some(eyes),
+            training_seed: 1,
+        }));
+        assert_eq!(s.training.unwrap().table_size, 245 * 4);
+        assert!(s.state_text.contains("Polyphemus to the"), "{}", s.state_text);
+        train(&mut sim, 500);
+        let report = deploy(&mut sim);
+        assert!(report.tasks[0].passed, "{report:?}");
+        assert_eq!(report.stars, Some(3), "500 episodes earns every star");
     }
 
     fn lesson(sim: &mut SimCore, mode: LessonMode) -> Snapshot {
@@ -1012,8 +1077,9 @@ mod tests {
                 let Some(def) = step.experiment() else { continue };
                 let mut sim = SimCore::default();
                 load(&mut sim, entry.id);
-                let SimResponse::Experiment { result, snapshot } =
-                    sim.handle(SimRequest::Experiment(experiment_spec(def)))
+                let config = experiment_spec(entry.id, def).unwrap();
+                let SimResponse::Experiment { result, snapshot, .. } =
+                    sim.handle(SimRequest::Experiment { config: Box::new(config), adopt: true })
                 else {
                     panic!("{} step {i}: the experiment did not run", entry.id);
                 };

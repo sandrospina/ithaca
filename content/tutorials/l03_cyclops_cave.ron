@@ -1,0 +1,109 @@
+// Tutorial for Level 3 — The Cyclops' Cave. State versus observation.
+// The guided experiments differ only in what the raft observes, so together
+// they also settle the level's comparison task. Their outcomes are pinned by
+// crates/rl-training/tests/cyclops_cave.rs and by the guided-experiment test.
+Tutorial(
+  schema: 1,
+  id: "l03_cyclops_cave",
+  level: "l03_cyclops_cave",
+  steps: [
+    Say(
+      beat: Briefing,
+      title: "The Cyclops' Cave",
+      text: (
+        story: "The giant Polyphemus has rolled a stone across his door, all but the narrow mouth. He waits in one of the two tunnels around the pillar, and he hunts by the shortest path.",
+        intuition: "Two tunnels lead round the rock pillar to the cave mouth. Each voyage's seed decides which tunnel Polyphemus starts in. He moves one cell every step, straight at the raft. Being caught costs −10 and ends the voyage.",
+      ),
+      highlight: [Objective, Arena],
+    ),
+    Experiment(
+      beat: OldWayFails,
+      title: "The raft you know",
+      text: (
+        story: "Send in the kind of raft that crossed the lotus sea: it knows exactly where it is, and nothing else.",
+        intuition: "Run the experiment: a raft that observes only its own position trains for 1,000 voyages. Then press WATCH TRAINED RAFT on a few seeds. Notice which tunnel it always takes, and what happens when Polyphemus is waiting there.",
+        math: "The observation is o = (x, y): 49 values, so the Q-table has 49 rows. The seed decides Polyphemus' tunnel, but nothing in o depends on it.",
+      ),
+      highlight: [Arena, Autopilot],
+      experiment: (
+        observation: [self_position(encoding: Index)],
+        training_seed: 1,
+        episodes: 1000,
+        expect: [(measure: ReachGoal, at_most: 0.7)],
+      ),
+    ),
+    Say(
+      beat: Explainer,
+      title: "State and observation",
+      text: (
+        story: "The raft is not blind. It simply was never told where to look.",
+        intuition: "The true state of the cave is where the raft is and where Polyphemus is. The raft's observation is only the first half. A Q-table has one row for each thing the raft can tell apart, so 'at the entrance, Polyphemus north' and 'at the entrance, Polyphemus west' share one row, and so share one best move. No amount of training can separate them.",
+        math: "Q-learning assumes the Markov property: the next observation and reward depend only on the current observation and action. Here they also depend on Polyphemus' position, which o leaves out, so the best the table can learn is the move that is best on average over both tunnels.",
+      ),
+      highlight: [State, QValues],
+    ),
+    Predict(
+      beat: Predict,
+      title: "Give it eyes",
+      text: (
+        story: "Let the raft look before it rows.",
+        intuition: "The Observation Builder in CONFIGURE lets you choose what the raft observes. Here the raft also sees which way Polyphemus is: north, east, south, west, or here. Predict, then run it.",
+        math: "The new observation is o = (x, y, d) with d one of 5 directions: 49 × 5 = 245 rows. Same algorithm, same settings, same seed.",
+      ),
+      highlight: [Observation],
+      question: "With the same training, what will the raft that sees which way Polyphemus is do?",
+      options: [
+        "Escape about as often as before: Polyphemus is as fast as the raft.",
+        "Escape on every test voyage, by the shortest route.",
+        "Learn nothing within the budget: the table is five times larger.",
+      ],
+      answer: 1,
+      explain: "From the entrance, 'Polyphemus to the east' and 'Polyphemus to the south' are now different rows, and each row learns its own best tunnel: the other one.",
+      experiment: (
+        observation: [self_position(encoding: Index), agent_direction(agent: "polyphemus")],
+        training_seed: 1,
+        episodes: 1000,
+        expect: [(measure: ReachGoal, at_least: 1.0)],
+      ),
+    ),
+    Say(
+      beat: Explainer,
+      title: "What it costs to see",
+      text: (
+        story: "Every extra thing a sailor watches is something more to learn.",
+        intuition: "The Observation Builder shows the Q-table's size for every choice. Polyphemus' exact position instead of his direction makes 49 × 49 = 2,401 rows: it works too, but needs more voyages and wanders more. The previous move makes 245 rows and helps not at all. The right feature carries the information the decision needs, and little else.",
+        math: "For discrete features the number of rows is the product of their cardinalities: |S| = ∏ c_i. Each row must be visited to be learned, so training cost grows with |S|.",
+      ),
+      highlight: [Observation],
+    ),
+    Say(
+      beat: GuidedExperiment,
+      title: "Prove it in COMPARE",
+      text: (
+        story: "Calypso trusts experiments, not stories.",
+        intuition: "Open COMPARE. Your two guided runs are in the log: they differ only in what the raft observes. Tick both and compare their learning curves and test voyages. WATCH replays any test voyage exactly, from its seed and its moves.",
+        math: "A fair comparison changes one thing. Same α, γ, ε, training seed and budget; only the observation differs. Then the difference in results is caused by the observation.",
+      ),
+      highlight: [Compare],
+    ),
+    Say(
+      beat: Challenge,
+      title: "Out of the cave",
+      text: (
+        story: "Now take your own crew out, under your own command.",
+        intuition: "Choose what the raft observes in CONFIGURE, apply, train within the budget and deploy: it must escape in 8 of 10 test voyages. Fewer training voyages earn more stars.",
+      ),
+      highlight: [Configure, Deploy, Objective],
+    ),
+    Say(
+      beat: Debrief,
+      title: "What the raft cannot see",
+      text: (
+        story: "Polyphemus was not cleverer than the raft. The raft simply could not see him.",
+        intuition: "A policy cannot react to information that is absent from its observation. Choosing the observation is part of designing an agent, as much as the reward. Next, the winds: even a raft that sees everything cannot be sure where a stroke will take it.",
+        math: "When o is a function of the full state s that keeps everything relevant to rewards and transitions, the problem stays a Markov decision process over o. When it drops something relevant, it becomes partially observable.",
+      ),
+      highlight: [Arena],
+    ),
+  ],
+)

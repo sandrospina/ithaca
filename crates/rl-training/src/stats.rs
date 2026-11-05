@@ -55,6 +55,9 @@ pub struct BatchEpisode {
     pub episode_return: f32,
     pub length: u32,
     pub reached_goal: bool,
+    /// Moves chosen at random by exploration; zero outside training.
+    #[serde(default)]
+    pub explored: u32,
 }
 
 /// Everything learned from running one agent over consecutive seeds.
@@ -174,7 +177,7 @@ mod tests {
     use super::*;
 
     fn ep(seed: u64, r: f32, reached: bool) -> BatchEpisode {
-        BatchEpisode { seed, episode_return: r, length: 10, reached_goal: reached }
+        BatchEpisode { seed, episode_return: r, length: 10, reached_goal: reached, explored: 0 }
     }
 
     #[test]

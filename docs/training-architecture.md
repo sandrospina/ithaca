@@ -165,7 +165,23 @@ The in-game **compute budget mechanic** and the **server quota** are deliberatel
 
 ## 8. Job protocol
 
-The Milestone 2 **experiment configuration is the job specification**.
+The Milestone 2 **experiment configuration is the job specification**: `ExperimentConfig`, schema 1, in
+`crates/rl-training/src/experiment.rs`.
+
+```text
+schema       1
+level        { id, hash }              hash = FNV-1a of the level file; a changed level refuses the job
+edits        { rewards, observation }  checked against the level's player_editable rules (EditMode::Strict)
+seed         training episode k sails on seed + k
+algorithm    QLearning { alpha, gamma, epsilon }
+episodes     at most the level's training budget
+evaluation   { first_seed, episodes }  greedy test voyages, recorded as seed + action log
+```
+
+`ExperimentConfig::prepare` reports every problem with its field, and is the check a worker runs before accepting a
+job. A run (`ExperimentRun`) records the curve (return, length, arrival, exploratory moves per episode), the test
+voyages, the spec hash, the engine version and the trained policy; `fingerprint()` hashes all of it, so a rerun can be
+compared bit for bit.
 
 Browser ↔ coordinator:
 
@@ -217,7 +233,7 @@ Storage:
 | Milestone | Work |
 |---|---|
 | 0–1 | Training runs in a Web Worker from day one. Introduce a `TrainingTarget` abstraction with only the local implementation. |
-| 2 | Freeze `ExperimentConfig` as a versioned, serialisable job spec with a validation schema. |
+| 2 | Freeze `ExperimentConfig` as a versioned, serialisable job spec with a validation schema. *Done: schema 1 in `crates/rl-training/src/experiment.rs`.* |
 | After 1 | Burn hardware spike on all three servers + browser WebGPU. On the 9070 XT, test both WSL2 + ROCm and native Windows + wgpu. Browser and developer Mac done 2026-11-04 (§2); servers pending. |
 | **7.5a** | `calypso-worker` in standalone mode with **tabular Q-learning**. Proves streaming, cancellation and policy download. |
 | **7.5b** | `calypso-coordinator`: OAuth sign-in, invite list, server directory, per-device queues, quotas, policy library. Connect all three workers. |

@@ -11,6 +11,8 @@ use crate::stats::BatchEpisode;
 pub enum EpisodeOutcome {
     ReachedGoal,
     Died,
+    /// Caught by an opponent.
+    Caught,
     OutOfTime,
 }
 
@@ -25,6 +27,9 @@ pub struct PlayedEpisode {
     pub hazard_steps: u32,
     /// Steps that ended on a lure cell.
     pub lure_steps: u32,
+    /// Moves chosen at random by ε-greedy exploration (training only).
+    #[serde(default)]
+    pub explored: u32,
 }
 
 impl PlayedEpisode {
@@ -34,6 +39,7 @@ impl PlayedEpisode {
             episode_return: self.episode_return,
             length: self.length,
             reached_goal: self.outcome == EpisodeOutcome::ReachedGoal,
+            explored: self.explored,
         }
     }
 }
@@ -43,7 +49,9 @@ struct Tally {
     episode_return: f32,
     hazard_steps: u32,
     lure_steps: u32,
+    explored: u32,
     died: bool,
+    caught: bool,
 }
 
 impl Tally {
@@ -54,6 +62,7 @@ impl Tally {
                 StepEvent::OnHazard { agent: 0, .. } => self.hazard_steps += 1,
                 StepEvent::OnLure { agent: 0, .. } => self.lure_steps += 1,
                 StepEvent::Died { agent: 0, .. } => self.died = true,
+                StepEvent::Caught { agent: 0, .. } => self.caught = true,
                 _ => {}
             }
         }
@@ -62,6 +71,8 @@ impl Tally {
     fn finish<W: World + ?Sized>(self, world: &W, seed: u64, last: &StepResults) -> PlayedEpisode {
         let outcome = if self.died {
             EpisodeOutcome::Died
+        } else if self.caught {
+            EpisodeOutcome::Caught
         } else if last.agents[0].terminated {
             EpisodeOutcome::ReachedGoal
         } else {
@@ -74,8 +85,43 @@ impl Tally {
             outcome,
             hazard_steps: self.hazard_steps,
             lure_steps: self.lure_steps,
+            explored: self.explored,
         }
     }
+}
+
+/// An agent's own random stream for an episode on `seed`. Live play, batch
+/// runs, deployment and experiment evaluation all use it, so any seed
+/// replays exactly.
+pub fn agent_rng(seed: u64) -> Rng {
+    Rng::new(seed).fork(0x5241_4654) // "RAFT"
+}
+
+/// Plays one episode on `seed` with `policy` and its own random stream,
+/// recording every action, so the episode can be replayed from the seed and
+/// the action log alone.
+pub fn play_recorded<W: World + ?Sized>(world: &mut W, policy: &mut dyn PolicyProvider, seed: u64) -> RecordedEpisode {
+    let mut rng = agent_rng(seed);
+    let mut obs: Observation = world.reset(seed).swap_remove(0);
+    let mut tally = Tally::default();
+    let mut actions = Vec::new();
+    loop {
+        let action = policy.act(&obs, &world.action_mask(0), &mut rng);
+        actions.push(action.discrete());
+        let r = world.step(&vec![action]);
+        tally.add(&r);
+        if r.done() {
+            return RecordedEpisode { played: tally.finish(world, seed, &r), actions };
+        }
+        obs = r.agents[0].observation.clone();
+    }
+}
+
+/// A played episode with its action log: the seed and the actions rebuild it exactly.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RecordedEpisode {
+    pub played: PlayedEpisode,
+    pub actions: Vec<u32>,
 }
 
 /// Plays one episode of a single-agent world with `policy`.
@@ -168,6 +214,7 @@ impl TrainingEpisode {
         let state = self.state;
         let mask = world.action_mask(0);
         let (action, explored) = learner.choose(state, &mask, rng);
+        self.tally.explored += u32::from(explored);
         let row_before = learner.table.row(state).to_vec();
         let r = world.step(&vec![rl_core::Action::Discrete(action)]);
         self.tally.add(&r);

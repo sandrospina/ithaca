@@ -119,9 +119,11 @@ pub fn line_values(l: &LessonState, line: usize, config: &QLearningConfig) -> [S
     }
     v[UNTIL] = match l.finished {
         Some(done) if shown(UNTIL) => {
+            let arrived = format!("reached {}", l.goal_name);
             let how = match done.outcome {
-                EpisodeOutcome::ReachedGoal => "reached the shore",
+                EpisodeOutcome::ReachedGoal => arrived.as_str(),
                 EpisodeOutcome::Died => "swallowed by a whirlpool",
+                EpisodeOutcome::Caught => "caught",
                 EpisodeOutcome::OutOfTime => "out of time",
             };
             format!("{how} · return {} in {} moves", num(done.episode_return), done.length)

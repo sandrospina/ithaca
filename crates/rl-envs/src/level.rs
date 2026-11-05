@@ -15,6 +15,9 @@ pub struct LevelDef {
     pub schema: u32,
     pub id: String,
     pub title: String,
+    /// What the goal is called in messages, e.g. "the cave mouth". Default: "the shore".
+    #[serde(default)]
+    pub goal_name: Option<String>,
     pub engine: EngineDef,
     /// Grid rows, top to bottom. `#` is a wall, `.` is open water; other
     /// characters are defined in `legend`.
@@ -101,12 +104,42 @@ pub struct AgentDef {
 pub enum ControllerDef {
     /// Controlled from outside the world: by the player or a learning agent.
     Learner,
+    /// Driven by a coded behaviour inside the world, e.g. a chasing Cyclops.
+    /// Scripted agents come after every learner in the `agents` list.
+    Scripted { behaviour: crate::behaviours::BehaviourDef },
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// One observation feature, from a fixed catalogue (`docs/environment-model.md` §3).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FeatureDef {
+    /// The observing agent's own cell.
     SelfPosition { encoding: Encoding },
+    /// Another agent's cell, as a cell index.
+    AgentPosition { agent: String },
+    /// Which way another agent lies from the observer: one of four compass
+    /// sectors (north, east, south, west by the larger offset), or "here".
+    AgentDirection { agent: String },
+    /// The observer's previous action, or "none" at the start of an episode.
+    PreviousAction,
+}
+
+impl FeatureDef {
+    /// The feature as the Observation Builder names it.
+    pub fn name(&self) -> String {
+        match self {
+            FeatureDef::SelfPosition { .. } => "the raft's position".into(),
+            FeatureDef::AgentPosition { agent } => format!("{}'s position", display_name(agent)),
+            FeatureDef::AgentDirection { agent } => format!("which way {} is", display_name(agent)),
+            FeatureDef::PreviousAction => "the previous move".into(),
+        }
+    }
+}
+
+/// An agent id as players read it: "polyphemus" becomes "Polyphemus".
+fn display_name(agent: &str) -> String {
+    let mut c = agent.chars();
+    c.next().map(|f| f.to_uppercase().chain(c).collect()).unwrap_or_default()
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -124,6 +157,8 @@ pub enum TerminationDef {
     GoalReached,
     /// Entering a lethal cell ends the episode.
     Death,
+    /// Being caught by a scripted opponent ends the episode.
+    CaughtByOpponent,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -198,6 +233,10 @@ pub enum TaskDef {
     ReplayBestSeed,
     /// Answer every question correctly. Answers come from the player's own batch.
     Quiz { questions: Vec<QuestionDef> },
+    /// Run two experiments in COMPARE that differ only in whether the agent
+    /// observes `agent` (its position or its direction), where the run that
+    /// observes it reaches the goal in at least `min_gain` more test episodes.
+    CompareObservations { agent: String, min_gain: u32 },
     /// Train an agent that succeeds in `threshold` of `eval_episodes` test episodes.
     TrainAgent {
         threshold: f32,

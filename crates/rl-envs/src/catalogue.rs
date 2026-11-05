@@ -16,11 +16,19 @@ pub enum RewardTerm {
     Death,
     /// Paid every step the agent ends on a lure cell (e.g. the lotus field).
     Lure,
+    /// Paid when a scripted opponent catches the agent (e.g. Polyphemus).
+    CaughtByOpponent,
 }
 
 impl RewardTerm {
-    pub const ALL: [RewardTerm; 5] =
-        [RewardTerm::GoalReached, RewardTerm::Step, RewardTerm::Hazard, RewardTerm::Death, RewardTerm::Lure];
+    pub const ALL: [RewardTerm; 6] = [
+        RewardTerm::GoalReached,
+        RewardTerm::Step,
+        RewardTerm::Hazard,
+        RewardTerm::Death,
+        RewardTerm::Lure,
+        RewardTerm::CaughtByOpponent,
+    ];
     pub const COUNT: usize = Self::ALL.len();
 
     pub fn name(self) -> &'static str {
@@ -30,6 +38,7 @@ impl RewardTerm {
             RewardTerm::Hazard => "hazard",
             RewardTerm::Death => "death",
             RewardTerm::Lure => "lure",
+            RewardTerm::CaughtByOpponent => "caught_by_opponent",
         }
     }
 
@@ -41,6 +50,7 @@ impl RewardTerm {
             RewardTerm::Hazard => "each move on a hazard",
             RewardTerm::Death => "entering a lethal cell",
             RewardTerm::Lure => "each move inside a lure",
+            RewardTerm::CaughtByOpponent => "being caught",
         }
     }
 

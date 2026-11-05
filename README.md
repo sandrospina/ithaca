@@ -5,7 +5,7 @@ Start with the development plan, `adversarial_rl_game_development_plan.md`, and 
 
 ## Status
 
-Milestones 0 and 1 are in place:
+Milestones 0–2 and Level 3 are in place:
 
 - Rust workspace with a multi-agent `World` trait and a deterministic RNG.
 - Grid engine driven by data files in `content/levels/`, with validation and a compile step.
@@ -42,7 +42,19 @@ Milestones 0 and 1 are in place:
   A raft trained on an older version of a level file is not loaded.
 - Training goes through a `TrainingTarget` interface, with this browser's worker as the only target so far.
 
-Next: the Burn hardware spike, then Milestone 2 (experiment specifications, run comparison, the concept library).
+- Experiments (Milestone 2): an `ExperimentConfig` is a versioned, validated job specification (level and file hash,
+  player edits, seed, algorithm, budget, test seeds), the same one the training servers will run. COMPARE runs
+  experiments without touching the current raft, reruns them to check they reproduce exactly (a fingerprint of the
+  whole run), compares up to four side by side, adopts one as the current raft, and replays any test voyage from its
+  seed and action log. The log is kept per level in the browser.
+- Concept library: LIBRARY lists every concept met so far at the three depths, with further reading and a way back
+  to the step that taught it. It is `content/concepts.ron`, which also generates `docs/rl-concepts.md`.
+- Level 3, The Cyclops' Cave: Polyphemus waits in one of two tunnels, picked by the seed, and chases the raft. The
+  Observation Builder in CONFIGURE chooses what the raft sees and shows the Q-table's size. A raft that sees only
+  itself cannot pass; the player proves by experiment what it must see (`crates/rl-training/tests/cyclops_cave.rs`).
+
+Next: playtest Levels 0–3 (the first playable prototype), then Level 4, The Bag of Winds. The Burn spike still needs
+the three servers.
 
 ## Layout
 
@@ -57,6 +69,7 @@ Next: the Burn hardware spike, then Milestone 2 (experiment specifications, run 
 | `crates/rl-web` | Leptos web client, renderer, simulation worker |
 | `content/levels` | Level files (RON) |
 | `content/tutorials` | Tutorial files (RON) |
+| `content/concepts.ron` | The concept library; generates `docs/rl-concepts.md` |
 
 ## Requirements
 
@@ -115,7 +128,7 @@ Useful for testing and screenshots:
 ?watch=1              start the agent sailing on load (agent-piloted levels)
 ?view=analyse         open the ANALYSE view
 ?batch=1000           run a batch of that many voyages on load
-?view=configure       open CONFIGURE (also train, walkthrough, analyse, deploy)
+?view=configure       open CONFIGURE (also train, walkthrough, analyse, deploy, compare, library)
 ?rewards=lure:5       start a new raft with these reward weights
 ?train=800            train that many episodes on load
 ?deploy=1             deploy once the training on load finishes

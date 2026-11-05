@@ -29,6 +29,13 @@ tokens! {
     GOAL      = "goal",      "#FFD24D";
     HAZARD    = "hazard",    "#FF7A1A";
     POLICY    = "policy",    "#C8FFD8";
+    // Comparison series, in fixed order. Validated for colour-blind
+    // separation and contrast on the shell background; each series also has
+    // its own dash pattern and letter.
+    SERIES_A  = "series-a",  "#C88300";
+    SERIES_B  = "series-b",  "#00A1A9";
+    SERIES_C  = "series-c",  "#CB234A";
+    SERIES_D  = "series-d",  "#8460D2";
 }
 
 /// The single colour each glyph is drawn in. Shape carries meaning first;

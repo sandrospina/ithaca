@@ -280,6 +280,18 @@ Implement experiment save/load, policy save/load with spec hashes, replay record
 
 Two experiments with different hyperparameters can be run and compared reproducibly, and every tutorial runs headlessly in CI.
 
+Status (2026-11-05): done.
+- `ExperimentConfig` (schema 1, `crates/rl-training/src/experiment.rs`) is the job specification: level id and file
+  hash, player edits, seed, algorithm with hyperparameters, training budget, evaluation seeds. It is validated
+  strictly against the level's editing rules; the same check will run on the servers.
+- A run records per-episode return, length, arrival and exploratory moves, the training steps, the test voyages as
+  seed + action log, the engine version and a fingerprint. The browser measures wall-clock time.
+- The COMPARE view runs, reruns (checking the fingerprint), adopts, compares up to four runs and replays test
+  voyages. The log is kept per level in IndexedDB. Tutorial guided experiments go through the same path.
+- Saved rafts carry the observation and the spec hash. CI runs every tutorial step headlessly: highlights must
+  exist in their level and every guided experiment must show its lesson.
+- The concept library (`content/concepts.ron`) opens from LIBRARY and generates `docs/rl-concepts.md`.
+
 ------------------------------------------------------------------------
 
 ## Milestone 3 — Level 2: The Lotus-Eaters
@@ -328,6 +340,12 @@ The UI shows the resulting Q-table size for each choice.
 The player demonstrates experimentally that adding the Cyclops to the observation substantially improves performance. The Level 1 agent visibly fails at the start of the level.
 
 **This milestone completes the first playable prototype. Playtest it with a few friends or students before continuing.**
+
+Status (2026-11-05): built. Polyphemus starts in one of two tunnels, picked by the seed, and chases by shortest path
+(`chase_shortest_path`, a `PolicyProvider` over a precomputed move table). Pinned by
+`crates/rl-training/tests/cyclops_cave.rs`: a raft that observes only its position escapes at most 7 of the 10 test
+seeds (the objective needs 8); with Polyphemus' direction (245 rows) it escapes all 10 within 500 episodes; with his
+position (2,401 rows) at least 8 within 2,000. The level's comparison task completes from the experiment log.
 
 ------------------------------------------------------------------------
 
@@ -812,11 +830,11 @@ Levels 14–16: 2v2, shared and centralised-critic team policies, communication,
 -   [x] Live pseudocode walkthrough.
 -   [x] Q-table persistence in IndexedDB, and the `TrainingTarget` abstraction (local worker only).
 -   [x] Learned-policy deployment.
--   [ ] Experiment serialisation and replay recording. *(Trained rafts are saved per level with a level-file hash; experiment specifications and run comparison are Milestone 2.)*
+-   [x] Experiment serialisation and replay recording (Milestone 2: `ExperimentConfig`, COMPARE, replays from action logs).
 -   [ ] Burn hardware spike on all three servers and the browser. Browser and Mac done; servers pending (`spikes/burn/README.md`).
 -   [x] Level 2: hazards, lotus lure, reward editor, tutorial.
--   [ ] Level 3: scripted Cyclops, Observation Builder, spec hashes, tutorial.
--   [ ] Compare agent-only observation with agent + Cyclops.
+-   [x] Level 3: scripted Cyclops, Observation Builder, spec hashes, tutorial.
+-   [x] Compare agent-only observation with agent + Cyclops (a Level 3 task, settled in COMPARE).
 -   [ ] Playtest with a few friends or students and evaluate whether the loop is educational and enjoyable.
 
 ------------------------------------------------------------------------

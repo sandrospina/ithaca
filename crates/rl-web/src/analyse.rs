@@ -22,14 +22,14 @@ use crate::protocol::Snapshot;
 /// Batch sizes offered to the player.
 pub const BATCH_SIZES: [u32; 4] = [10, 100, 1_000, 10_000];
 
-const W: f64 = 680.0;
-const H: f64 = 230.0;
-const PAD_L: f64 = 48.0;
-const PAD_R: f64 = 128.0;
-const PAD_T: f64 = 14.0;
-const PAD_B: f64 = 30.0;
-const PLOT_W: f64 = W - PAD_L - PAD_R;
-const PLOT_H: f64 = H - PAD_T - PAD_B;
+pub(crate) const W: f64 = 680.0;
+pub(crate) const H: f64 = 230.0;
+pub(crate) const PAD_L: f64 = 48.0;
+pub(crate) const PAD_R: f64 = 128.0;
+pub(crate) const PAD_T: f64 = 14.0;
+pub(crate) const PAD_B: f64 = 30.0;
+pub(crate) const PLOT_W: f64 = W - PAD_L - PAD_R;
+pub(crate) const PLOT_H: f64 = H - PAD_T - PAD_B;
 
 /// Shared state and actions for the view.
 #[derive(Clone, Copy)]
@@ -50,9 +50,9 @@ pub struct AnalyseCtx {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Hover {
     /// Position in percent of the chart box.
-    x: f64,
-    y: f64,
-    text: String,
+    pub x: f64,
+    pub y: f64,
+    pub text: String,
 }
 
 pub fn tooltip(hover: RwSignal<Option<Hover>>) -> impl IntoView {
@@ -67,7 +67,7 @@ pub fn tooltip(hover: RwSignal<Option<Hover>>) -> impl IntoView {
     }
 }
 
-fn y_axis(lo: f64, hi: f64, y: impl Fn(f64) -> f64) -> impl IntoView {
+pub(crate) fn y_axis(lo: f64, hi: f64, y: impl Fn(f64) -> f64) -> impl IntoView {
     ticks(lo, hi, 5)
         .into_iter()
         .map(|t| {
@@ -174,7 +174,7 @@ pub fn episode_chart(c: EpisodeChart<'_>, hover: RwSignal<Option<Hover>>) -> imp
                 e.seed,
                 signed(f64::from(e.episode_return)),
                 e.length,
-                if e.reached_goal { "" } else { " · did not reach the shore" }
+                if e.reached_goal { "" } else { " · did not arrive" }
             ),
         }));
     };

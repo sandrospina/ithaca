@@ -8,6 +8,8 @@ use rl_training::BatchReport;
 use serde::{Deserialize, Serialize};
 
 use crate::content::LEVELS;
+use crate::experiments::ExperimentLog;
+use crate::protocol::FeatureDef;
 use crate::protocol::{DeployReport, Outcome, SailedBy, Snapshot};
 
 pub const STORAGE_KEY: &str = "reinforcement-odyssey.progress.v1";
@@ -23,6 +25,9 @@ pub struct Progress {
     /// Done task and question keys per level: `"2"` is task 2, `"2.1"` is question 1 of task 2.
     #[serde(default)]
     pub tasks: BTreeMap<String, BTreeSet<String>>,
+    /// The furthest tutorial step reached per level: it unlocks concepts.
+    #[serde(default)]
+    pub reached: BTreeMap<String, usize>,
 }
 
 /// A player's answer to a question.
@@ -135,6 +140,22 @@ impl Progress {
         (0..LEVELS.len()).rev().find(|&i| self.is_unlocked(i)).unwrap_or(0)
     }
 
+    /// Records that the tutorial of `level_id` reached `step`. Returns false if
+    /// it had already reached that far.
+    pub fn reach(&mut self, level_id: &str, step: usize) -> bool {
+        let before = self.reached.get(level_id).copied();
+        let further = before.is_none_or(|r| step > r);
+        if further {
+            self.reached.insert(level_id.to_string(), step);
+        }
+        further
+    }
+
+    /// Whether a concept taught at `step` of `level_id`'s tutorial is open.
+    pub fn concept_unlocked(&self, level_id: &str, step: usize) -> bool {
+        self.is_complete(level_id) || self.reached.get(level_id).is_some_and(|&r| r >= step)
+    }
+
     pub fn best(&self, level_id: &str) -> Option<f32> {
         self.best_return.get(level_id).copied()
     }
@@ -180,6 +201,12 @@ impl Progress {
                         let right = (0..questions.len()).filter(|&q| self.done(level_id, &question_key(i, q))).count();
                         (format!("answer Calypso's questions {right}/{}", questions.len()), None)
                     }
+                    TaskDef::CompareObservations { agent, min_gain } => (
+                        format!("show by experiment that seeing {} helps", crate::experiments::display_name(agent)),
+                        Some(format!(
+                            "two COMPARE runs that differ only in what the raft sees; {min_gain}+ more escapes"
+                        )),
+                    ),
                     TaskDef::TrainAgent { threshold, eval_episodes, success, label, .. } => {
                         let wins = (threshold * *eval_episodes as f32).ceil() as u32;
                         let what = match success {
@@ -294,6 +321,22 @@ impl Progress {
         self.refresh(level_id, goal)
     }
 
+    /// Records the level's experiment log: a comparison task is done when the
+    /// log holds a pair of runs that settles it. Returns true if this completed the level.
+    pub fn record_experiments(&mut self, goal: &GoalDef, log: &ExperimentLog, default: &[FeatureDef]) -> bool {
+        let GoalDef::Tasks(tasks) = goal else {
+            return false;
+        };
+        for (i, task) in tasks.iter().enumerate() {
+            if let TaskDef::CompareObservations { agent, min_gain } = task
+                && log.observation_gain(agent, default).is_some_and(|g| g >= i64::from(*min_gain))
+            {
+                self.mark(&log.level_id, task_key(i));
+            }
+        }
+        self.refresh(&log.level_id, goal)
+    }
+
     pub fn question_done(&self, level_id: &str, task: usize, question: usize) -> bool {
         self.done(level_id, &question_key(task, question))
     }
@@ -319,6 +362,19 @@ mod tests {
             last = snap(sim.handle(SimRequest::Step { action }));
         }
         last
+    }
+
+    #[test]
+    fn concepts_open_as_the_tutorial_reaches_them() {
+        let mut p = Progress::default();
+        assert!(!p.concept_unlocked("l01_the_raft", 0), "nothing before the level is opened");
+        assert!(p.reach("l01_the_raft", 0));
+        assert!(p.concept_unlocked("l01_the_raft", 0));
+        assert!(p.reach("l01_the_raft", 6));
+        assert!(!p.reach("l01_the_raft", 2), "going back keeps what was reached");
+        assert!(p.concept_unlocked("l01_the_raft", 6) && !p.concept_unlocked("l01_the_raft", 7));
+        p.completed.insert("l01_the_raft".into());
+        assert!(p.concept_unlocked("l01_the_raft", 11), "a completed level opens all its concepts");
     }
 
     #[test]

@@ -3,8 +3,13 @@
 pub use rl_agents::{QLearner, QLearningConfig};
 use rl_core::RenderModel;
 use rl_core::Rng;
-pub use rl_envs::{GoalDef, Pilot};
-pub use rl_training::{BatchEpisode, BatchReport, EpisodeOutcome, PlayedEpisode, TransitionTrace};
+pub use rl_core::SpecHash;
+pub use rl_envs::level::FeatureDef;
+pub use rl_envs::{GoalDef, Pilot, PlayerEdits};
+pub use rl_training::{
+    BatchEpisode, BatchReport, EpisodeOutcome, ExperimentConfig, ExperimentRun, PlayedEpisode,
+    QLearningBounds as ConfigBounds, RecordedEpisode, TransitionTrace,
+};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -19,7 +24,14 @@ pub enum SimRequest {
     AgentStep { trained: bool },
     /// Starts a fresh trained agent with these settings. Values outside the
     /// level's editing bounds are clamped; terms the player may not edit are ignored.
-    Configure { config: QLearningConfig, rewards: Vec<(String, f32)>, training_seed: u64 },
+    /// `observation`, if given, replaces the agent's observation features.
+    Configure {
+        config: QLearningConfig,
+        rewards: Vec<(String, f32)>,
+        #[serde(default)]
+        observation: Option<Vec<FeatureDef>>,
+        training_seed: u64,
+    },
     /// Trains the current agent for up to `episodes` more episodes, within the budget.
     Train { episodes: u32 },
     /// Tests the trained agent's greedy policy on each training task's test seeds.
@@ -29,9 +41,14 @@ pub enum SimRequest {
     /// The live walkthrough: training one move or one episode at a time. These
     /// are real training episodes of the current raft and count toward the budget.
     Lesson { mode: LessonMode },
-    /// A tutorial's guided experiment: a new raft with pinned settings, trained
-    /// and then tested on the level's test seeds.
-    Experiment(ExperimentSpec),
+    /// Runs an experiment: trains a new raft from the specification, then tests
+    /// it on its evaluation seeds. With `adopt`, the raft becomes the current
+    /// one (a tutorial's guided experiment); otherwise the current raft is untouched.
+    Experiment { config: Box<ExperimentConfig>, adopt: bool },
+    /// Plays a recorded voyage on the arena: the seed and the action log, in a
+    /// world with the edits it was recorded with. AgentStep then takes the next
+    /// recorded action.
+    Replay { seed: u64, actions: Vec<u32>, edits: PlayerEdits },
     /// Asks for the current raft in a form that can be saved.
     Export,
     /// Replaces the current raft with a saved one, if it was trained on this
@@ -49,14 +66,6 @@ pub enum LessonMode {
     Episode,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct ExperimentSpec {
-    pub config: QLearningConfig,
-    pub rewards: Vec<(String, f32)>,
-    pub training_seed: u64,
-    pub episodes: u32,
-}
-
 /// How a guided experiment's raft did on the test seeds.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ExperimentResult {
@@ -67,6 +76,20 @@ pub struct ExperimentResult {
     pub shortest: Option<u32>,
     pub mean_return: f32,
     pub mean_length: f32,
+}
+
+impl ExperimentResult {
+    pub fn of(run: &ExperimentRun) -> Self {
+        let e = &run.evaluation;
+        Self {
+            episodes_trained: run.curve.len() as u32,
+            tested: e.tested(),
+            reached: e.reached,
+            shortest: e.shortest,
+            mean_return: e.mean_return,
+            mean_length: e.mean_length,
+        }
+    }
 }
 
 /// Version of [`SavedRaft`]; older saves are ignored.
@@ -85,6 +108,13 @@ pub struct SavedRaft {
     pub learner: QLearner,
     pub rng: Rng,
     pub curve: Vec<BatchEpisode>,
+    /// The observation it was trained with; `None` means the level's default.
+    #[serde(default)]
+    pub observation: Option<Vec<FeatureDef>>,
+    /// Hash of the observation and action specs it was trained on. Saves from
+    /// before spec hashes were recorded have none.
+    #[serde(default)]
+    pub spec_hash: Option<SpecHash>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -97,6 +127,7 @@ pub enum SimResponse {
     /// A snapshot after a walkthrough request, so the UI can schedule the next one.
     Lesson(Box<Snapshot>),
     Experiment {
+        run: Box<ExperimentRun>,
         result: ExperimentResult,
         snapshot: Box<Snapshot>,
     },
@@ -109,6 +140,8 @@ pub enum Outcome {
     Sailing,
     ReachedShore,
     Died,
+    /// Caught by an opponent.
+    Caught,
     OutOfTime,
 }
 
@@ -119,6 +152,8 @@ pub enum SailedBy {
     Player,
     RandomAgent,
     TrainedAgent,
+    /// A recorded voyage played back from its action log.
+    Replay,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -149,6 +184,8 @@ pub struct Baseline {
 pub struct Snapshot {
     pub level_id: String,
     pub title: String,
+    /// What the goal is called, e.g. "the shore".
+    pub goal_name: String,
     pub render: RenderModel,
     pub pilot: Pilot,
     pub objective: Option<Objective>,
@@ -164,6 +201,8 @@ pub struct Snapshot {
     pub max_steps: u32,
     pub position: (i32, i32),
     pub state_index: Option<u32>,
+    /// What the raft observes, in words.
+    pub state_text: String,
     /// Number of distinct states (the Q-table row count), if discrete.
     pub state_count: Option<u64>,
     pub last_action: Option<String>,
@@ -174,6 +213,8 @@ pub struct Snapshot {
     pub log: Vec<String>,
     /// The walkthrough episode, once the walkthrough has been opened.
     pub lesson: Option<LessonState>,
+    /// Whether the arena shows a recorded voyage rather than the live world.
+    pub replaying: bool,
 }
 
 /// The walkthrough's training episode: shown in its own copy of the world,
@@ -193,6 +234,8 @@ pub struct LessonState {
     /// The move just made, if any in this episode.
     pub last: Option<LessonMove>,
     pub finished: Option<PlayedEpisode>,
+    /// What the goal is called, e.g. "the shore".
+    pub goal_name: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -210,14 +253,6 @@ pub struct RewardSetting {
     pub label: String,
     pub weight: f32,
     pub editable: bool,
-}
-
-/// Inclusive bounds for each learning setting.
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
-pub struct ConfigBounds {
-    pub alpha: (f32, f32),
-    pub gamma: (f32, f32),
-    pub epsilon: (f32, f32),
 }
 
 /// What the trained agent believes about one cell.
@@ -244,6 +279,31 @@ pub struct TrainingStatus {
     pub curve: Vec<BatchEpisode>,
     /// Q-values per open cell, when states map one-to-one onto cells.
     pub policy: Vec<CellPolicy>,
+    /// The agent's observation, on levels where the player chooses it.
+    pub observation: Option<ObservationStatus>,
+}
+
+impl ObservationStatus {
+    /// Rows of the Q-table for the current features.
+    pub fn rows(&self) -> u64 {
+        self.allowed.iter().filter(|f| self.features.contains(&f.feature)).map(|f| u64::from(f.cardinality)).product()
+    }
+}
+
+/// What the agent observes, and what else it could observe in this level.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ObservationStatus {
+    pub features: Vec<FeatureDef>,
+    pub allowed: Vec<FeatureOption>,
+}
+
+/// One feature the Observation Builder offers.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct FeatureOption {
+    pub feature: FeatureDef,
+    pub name: String,
+    /// How many distinct values it takes: it multiplies the Q-table's rows.
+    pub cardinality: u32,
 }
 
 /// The result of one training task on its test seeds.

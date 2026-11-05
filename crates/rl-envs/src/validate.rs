@@ -3,8 +3,12 @@
 
 use std::fmt;
 
+use crate::behaviours::BehaviourDef;
 use crate::catalogue::RewardTerm;
-use crate::level::{EngineDef, GoalDef, LegendEntry, LevelDef, QuestionDef, SCHEMA_VERSION, TaskDef, TerminationDef};
+use crate::level::{
+    ControllerDef, EngineDef, FeatureDef, GoalDef, LegendEntry, LevelDef, QuestionDef, SCHEMA_VERSION, TaskDef,
+    TerminationDef,
+};
 
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 #[error("{field}: {message}")]
@@ -38,6 +42,8 @@ impl fmt::Display for LevelErrors {
 impl std::error::Error for LevelErrors {}
 
 pub const MAX_GRID_SIDE: u32 = 64;
+/// Largest grid a scripted chaser may hunt on: its move table grows with the square of the cell count.
+pub const MAX_CHASE_CELLS: u32 = 32 * 32;
 /// Largest batch of episodes a player can run at once.
 pub const MAX_BATCH_EPISODES: u32 = 10_000;
 
@@ -122,13 +128,62 @@ pub fn validate(def: &LevelDef) -> Result<(), LevelErrors> {
             }
         }
     }
-    for (i, name) in def.agents.keys().enumerate() {
-        if spawn_counts[i] != 1 {
-            err("map", format!("agent \"{name}\" needs exactly one spawn cell, found {}", spawn_counts[i]));
+    for (i, (name, agent)) in def.agents.iter().enumerate() {
+        // A learner starts in one place; a scripted agent may have several
+        // spawn cells, one picked per episode from its seed.
+        let ok = match agent.controller {
+            ControllerDef::Learner => spawn_counts[i] == 1,
+            ControllerDef::Scripted { .. } => spawn_counts[i] >= 1,
+        };
+        if !ok {
+            err("map", format!("agent \"{name}\" has {} spawn cells", spawn_counts[i]));
         }
     }
     if def.agents.is_empty() {
         err("agents", "at least one agent is required".into());
+    }
+    let learners = def.agents.values().take_while(|a| a.controller == ControllerDef::Learner).count();
+    if learners == 0 {
+        err("agents", "the first agent must be a Learner".into());
+    }
+    if def.agents.values().skip(learners).any(|a| a.controller == ControllerDef::Learner) {
+        err("agents", "learners come before scripted agents".into());
+    }
+    let scripted: Vec<&str> = def.agents.keys().skip(learners).map(String::as_str).collect();
+    for (name, agent) in def.agents.iter().skip(learners) {
+        let ControllerDef::Scripted { behaviour: BehaviourDef::ChaseShortestPath { every_n_steps } } =
+            &agent.controller
+        else {
+            continue;
+        };
+        if *every_n_steps == 0 {
+            err("agents", format!("\"{name}\": every_n_steps must be at least 1"));
+        }
+        if width * height > MAX_CHASE_CELLS {
+            err("agents", format!("\"{name}\": chase_shortest_path needs a grid of at most {MAX_CHASE_CELLS} cells"));
+        }
+    }
+    if def.termination.contains(&TerminationDef::CaughtByOpponent) && scripted.is_empty() {
+        err("termination", "CaughtByOpponent needs a scripted agent to do the catching".into());
+    }
+    let feature_problem = |f: &FeatureDef| match f {
+        FeatureDef::AgentPosition { agent } | FeatureDef::AgentDirection { agent }
+            if !scripted.contains(&agent.as_str()) =>
+        {
+            Some(format!("{} refers to \"{agent}\", which is not a scripted agent", f.name()))
+        }
+        _ => None,
+    };
+    for problem in def.observation.iter().filter_map(feature_problem) {
+        err("observation", problem);
+    }
+    if let Some(edit) = &def.player_editable.observation {
+        for problem in edit.allowed.iter().filter_map(feature_problem) {
+            err("player_editable.observation", problem);
+        }
+        if !def.observation.iter().all(|f| edit.allowed.contains(f)) {
+            err("player_editable.observation", "the default observation must be among the allowed features".into());
+        }
     }
 
     for (c, entry) in &def.legend {
@@ -224,6 +279,20 @@ pub fn validate(def: &LevelDef) -> Result<(), LevelErrors> {
                     match task {
                         TaskDef::BatchRun { min_episodes } if !(1..=MAX_BATCH_EPISODES).contains(min_episodes) => {
                             err("challenge", format!("task {i}: min_episodes must be 1..={MAX_BATCH_EPISODES}"));
+                        }
+                        TaskDef::CompareObservations { agent, min_gain } => {
+                            if !scripted.contains(&agent.as_str()) {
+                                err("challenge", format!("task {i}: \"{agent}\" is not a scripted agent"));
+                            }
+                            if *min_gain == 0 {
+                                err("challenge", format!("task {i}: min_gain must be at least 1"));
+                            }
+                            if def.player_editable.observation.is_none() {
+                                err(
+                                    "challenge",
+                                    format!("task {i}: comparing observations needs an editable observation"),
+                                );
+                            }
                         }
                         TaskDef::TrainAgent { threshold, eval_episodes, .. } => {
                             for problem in rate_problems(*threshold, *eval_episodes) {

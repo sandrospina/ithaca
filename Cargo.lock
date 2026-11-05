@@ -1394,12 +1394,14 @@ dependencies = [
  "rl-core",
  "rl-envs",
  "serde",
+ "serde_json",
 ]
 
 [[package]]
 name = "rl-tutorial"
 version = "0.1.0"
 dependencies = [
+ "rl-envs",
  "ron",
  "serde",
  "thiserror 2.0.21",

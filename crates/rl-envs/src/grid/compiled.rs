@@ -1,16 +1,23 @@
 //! Compilation of a validated `LevelDef` into flat arrays. The hot loop
 //! never touches strings or maps.
 
+use std::sync::Arc;
+
 use rl_core::{ActionSpace, AgentSpec, FeatureSpec, Glyph, ObservationSpec, WorldSpec};
 
+use crate::behaviours::{BehaviourDef, ChaseShortestPath};
 use crate::catalogue::RewardTerm;
-use crate::level::{BudgetDef, ChallengeDef, Encoding, EngineDef, FeatureDef, LevelDef, Pilot, TerminationDef};
+use crate::level::{
+    BudgetDef, ChallengeDef, ControllerDef, Encoding, EngineDef, FeatureDef, LevelDef, Pilot, TerminationDef,
+};
 use crate::validate::{CellMeaning, LevelErrors, resolve_char, validate};
 
 #[derive(Clone, Debug)]
 pub struct CompiledGrid {
     pub id: String,
     pub title: String,
+    /// What the goal is called in messages.
+    pub goal_name: String,
     pub width: i32,
     pub height: i32,
     /// Row-major, `width * height`.
@@ -28,14 +35,23 @@ pub struct CompiledGrid {
     /// Reward terms present in the level file, in file order.
     pub reward_terms: Vec<RewardTerm>,
     pub player_editable: crate::level::PlayerEditable,
-    pub spawns: Vec<(i32, i32)>,
+    /// Spawn cells per agent. With several, each episode picks one from its seed.
+    pub spawns: Vec<Vec<(i32, i32)>>,
+    /// Every agent, learners first.
     pub agent_names: Vec<String>,
+    /// How many agents are learners, controlled from outside. They come first.
+    pub learners: usize,
+    /// Agents driven by a coded behaviour, after the learners.
+    pub scripted: Vec<ScriptedAgent>,
     pub agent_glyphs: Vec<Glyph>,
     /// Weight per reward term, indexed by `RewardTerm::index`.
     pub reward_weights: [f32; RewardTerm::COUNT],
     pub terminate_on_goal: bool,
+    pub terminate_on_catch: bool,
     pub max_steps: u32,
     pub features: Vec<FeatureDef>,
+    /// `features` with agent names resolved to indices, for the hot loop.
+    pub compiled_features: Vec<CompiledFeature>,
     pub spec: WorldSpec,
     pub pilot: Pilot,
     pub challenge: Option<ChallengeDef>,
@@ -88,7 +104,7 @@ impl CompiledGrid {
         let mut hazards = vec![false; cells];
         let mut lethal = vec![false; cells];
         let mut lures = vec![false; cells];
-        let mut spawns = vec![(0, 0); def.agents.len()];
+        let mut spawns = vec![Vec::new(); def.agents.len()];
         for (y, row) in def.map.iter().enumerate() {
             for (x, c) in row.chars().enumerate() {
                 let i = y * width as usize + x;
@@ -100,7 +116,7 @@ impl CompiledGrid {
                     CellMeaning::Lure => lures[i] = true,
                     CellMeaning::Spawn(agent) => {
                         let id = def.agents.get_index_of(agent).expect("validated");
-                        spawns[id] = (x as i32, y as i32);
+                        spawns[id].push((x as i32, y as i32));
                     }
                     CellMeaning::Open => {}
                 }
@@ -112,26 +128,26 @@ impl CompiledGrid {
             reward_weights[RewardTerm::from_name(name).expect("validated").index()] = *weight;
         }
 
-        let observation =
-            ObservationSpec { features: def.observation.iter().map(|f| feature_spec(f, width, height)).collect() };
-        let spec = WorldSpec {
-            agents: def
-                .agents
-                .keys()
-                .map(|name| AgentSpec {
-                    name: name.clone(),
-                    observation: observation.clone(),
-                    action: ActionSpace::Discrete {
-                        n: 4,
-                        labels: ["north", "east", "south", "west"].map(String::from).to_vec(),
-                    },
-                })
-                .collect(),
-        };
+        let agent_names: Vec<String> = def.agents.keys().cloned().collect();
+        let learners = def.agents.values().take_while(|a| a.controller == ControllerDef::Learner).count();
+        let spec = world_spec(&agent_names[..learners], &def.observation, width, height);
+        let chase = Arc::new(ChaseShortestPath::new(w, h, &walls));
+        let scripted = def
+            .agents
+            .values()
+            .enumerate()
+            .filter_map(|(agent, a)| match &a.controller {
+                ControllerDef::Learner => None,
+                ControllerDef::Scripted { behaviour: BehaviourDef::ChaseShortestPath { every_n_steps } } => {
+                    Some(ScriptedAgent { agent, every_n_steps: *every_n_steps, chase: chase.clone() })
+                }
+            })
+            .collect();
 
         Self {
             id: def.id.clone(),
             title: def.title.clone(),
+            goal_name: def.goal_name.clone().unwrap_or_else(|| "the shore".into()),
             width: w,
             height: h,
             walls,
@@ -144,10 +160,14 @@ impl CompiledGrid {
             reward_terms: def.reward.keys().filter_map(|n| RewardTerm::from_name(n)).collect(),
             player_editable: def.player_editable.clone(),
             spawns,
-            agent_names: def.agents.keys().cloned().collect(),
+            compiled_features: compile_features(&def.observation, &agent_names),
+            agent_names,
+            learners,
+            scripted,
             agent_glyphs: def.agents.values().map(|a| a.glyph).collect(),
             reward_weights,
             terminate_on_goal: def.termination.contains(&TerminationDef::GoalReached),
+            terminate_on_catch: def.termination.contains(&TerminationDef::CaughtByOpponent),
             max_steps: def.truncation.max_steps,
             features: def.observation.clone(),
             spec,
@@ -155,6 +175,19 @@ impl CompiledGrid {
             challenge: def.challenge.clone(),
             budget: def.budget.clone(),
         }
+    }
+
+    /// Replaces every learner's observation features, e.g. from the
+    /// Observation Builder. Callers check the level's editing rules.
+    pub fn set_features(&mut self, features: Vec<FeatureDef>) {
+        self.spec = world_spec(&self.agent_names[..self.learners], &features, self.width as u32, self.height as u32);
+        self.compiled_features = compile_features(&features, &self.agent_names);
+        self.features = features;
+    }
+
+    /// Distinct values of a feature in this grid, if it is discrete.
+    pub fn feature_cardinality(&self, f: &FeatureDef) -> Option<u32> {
+        feature_spec(f, self.width as u32, self.height as u32).cardinality
     }
 
     pub fn index(&self, (x, y): (i32, i32)) -> usize {
@@ -183,7 +216,7 @@ impl CompiledGrid {
     /// search, together with that goal's reward term. `None` if no goal is
     /// reachable.
     pub fn shortest_path_to_goal(&self, agent: usize) -> Option<(u32, RewardTerm)> {
-        let start = self.spawns[agent];
+        let start = self.spawns[agent][0];
         let mut dist = vec![u32::MAX; self.walls.len()];
         let mut queue = std::collections::VecDeque::from([start]);
         dist[self.index(start)] = 0;
@@ -214,6 +247,60 @@ impl CompiledGrid {
     }
 }
 
+/// A scripted agent and its compiled behaviour.
+#[derive(Clone, Debug)]
+pub struct ScriptedAgent {
+    /// Index among all agents.
+    pub agent: usize,
+    pub every_n_steps: u32,
+    /// Shared between copies of the world: it never changes after compiling.
+    pub chase: Arc<ChaseShortestPath>,
+}
+
+/// An observation feature with agent names resolved to indices.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CompiledFeature {
+    SelfPosition(Encoding),
+    AgentPosition(usize),
+    AgentDirection(usize),
+    PreviousAction,
+}
+
+/// Values of the `agent_direction` feature: here, then the four compass sectors.
+pub const DIRECTION_VALUES: u32 = 5;
+/// Values of the `previous_action` feature: none, then the four moves.
+pub const PREVIOUS_ACTION_VALUES: u32 = 5;
+
+fn compile_features(features: &[FeatureDef], agent_names: &[String]) -> Vec<CompiledFeature> {
+    let index = |name: &str| agent_names.iter().position(|n| n == name).expect("validated");
+    features
+        .iter()
+        .map(|f| match f {
+            FeatureDef::SelfPosition { encoding } => CompiledFeature::SelfPosition(*encoding),
+            FeatureDef::AgentPosition { agent } => CompiledFeature::AgentPosition(index(agent)),
+            FeatureDef::AgentDirection { agent } => CompiledFeature::AgentDirection(index(agent)),
+            FeatureDef::PreviousAction => CompiledFeature::PreviousAction,
+        })
+        .collect()
+}
+
+fn world_spec(agent_names: &[String], features: &[FeatureDef], width: u32, height: u32) -> WorldSpec {
+    let observation = ObservationSpec { features: features.iter().map(|f| feature_spec(f, width, height)).collect() };
+    WorldSpec {
+        agents: agent_names
+            .iter()
+            .map(|name| AgentSpec {
+                name: name.clone(),
+                observation: observation.clone(),
+                action: ActionSpace::Discrete {
+                    n: 4,
+                    labels: ["north", "east", "south", "west"].map(String::from).to_vec(),
+                },
+            })
+            .collect(),
+    }
+}
+
 fn feature_spec(f: &FeatureDef, width: u32, height: u32) -> FeatureSpec {
     let cells = width * height;
     match f {
@@ -228,5 +315,16 @@ fn feature_spec(f: &FeatureDef, width: u32, height: u32) -> FeatureSpec {
                 FeatureSpec { name: "self_position(encoding: one_hot)".into(), size: cells, cardinality: Some(cells) }
             }
         },
+        FeatureDef::AgentPosition { agent } => {
+            FeatureSpec { name: format!("agent_position(agent: {agent})"), size: 1, cardinality: Some(cells) }
+        }
+        FeatureDef::AgentDirection { agent } => FeatureSpec {
+            name: format!("agent_direction(agent: {agent})"),
+            size: 1,
+            cardinality: Some(DIRECTION_VALUES),
+        },
+        FeatureDef::PreviousAction => {
+            FeatureSpec { name: "previous_action".into(), size: 1, cardinality: Some(PREVIOUS_ACTION_VALUES) }
+        }
     }
 }

@@ -7,7 +7,10 @@ use rl_tutorial::UiElement;
 use crate::analyse::{EpisodeChart, Hover, episode_chart};
 use crate::campaign::Progress;
 use crate::chart_math::signed;
-use crate::protocol::{DeployReport, EpisodeOutcome, Snapshot, TrainingStatus};
+use crate::protocol::{
+    DeployReport, EpisodeOutcome, ExperimentConfig, FeatureDef, ObservationStatus, PlayerEdits, Snapshot,
+    TrainingStatus,
+};
 
 /// Episodes averaged by the learning curve's trend line.
 pub const CURVE_WINDOW: usize = 50;
@@ -17,6 +20,8 @@ pub const CURVE_WINDOW: usize = 50;
 pub struct Draft {
     pub config: QLearningConfig,
     pub rewards: Vec<(String, f32)>,
+    /// The observation features, on levels where the player chooses them.
+    pub observation: Option<Vec<FeatureDef>>,
     pub training_seed: u64,
 }
 
@@ -25,8 +30,27 @@ impl Draft {
         Self {
             config: t.config,
             rewards: t.rewards.iter().map(|r| (r.term.clone(), r.weight)).collect(),
+            observation: t.observation.as_ref().map(|o| o.features.clone()),
             training_seed: t.training_seed,
         }
+    }
+
+    /// An experiment with these settings on `level_id`. Only the reward terms
+    /// the level lets the player edit are part of it.
+    pub fn experiment(
+        &self,
+        level_id: &str,
+        status: &TrainingStatus,
+        episodes: u32,
+    ) -> Result<ExperimentConfig, String> {
+        let source = crate::content::level(level_id).ok_or("unknown level")?.level_source;
+        let editable = |term: &str| status.rewards.iter().any(|r| r.term == term && r.editable);
+        let edits = PlayerEdits {
+            rewards: self.rewards.iter().filter(|(t, _)| editable(t)).cloned().collect(),
+            observation: self.observation.clone(),
+        };
+        ExperimentConfig::q_learning(level_id, source, edits, self.config, self.training_seed, episodes)
+            .map_err(|e| crate::sim::errors_text(&e))
     }
 
     /// Whether the draft differs from what the current raft was trained with.
@@ -49,6 +73,8 @@ pub struct TrainCtx {
     pub open_walkthrough: Callback<()>,
     pub deploy_now: Callback<()>,
     pub watch_trained: Callback<u64>,
+    /// Runs the draft settings as an experiment, keeping the current raft.
+    pub run_experiment: Callback<()>,
 }
 
 impl TrainCtx {
@@ -114,11 +140,13 @@ pub fn configure_view(ctx: TrainCtx) -> impl IntoView {
             <section class="training-view" class:hl-box=move || ctx.hl(UiElement::Configure)>
                 <h2>"CONFIGURE · A NEW RAFT"</h2>
                 <p class="subtitle">
-                    {format!(
-                        "Settings apply to a fresh raft. Its Q-table holds {} numbers, all starting at zero.",
-                        status.table_size
-                    )}
+                    {if status.observation.is_some() {
+                        "Settings apply to a fresh raft, its Q-table all zeros.".to_string()
+                    } else {
+                        format!("Settings apply to a fresh raft. Its Q-table holds {} numbers, all starting at zero.", status.table_size)
+                    }}
                 </p>
+                {status.observation.clone().map(|o| observation_builder(ctx, o))}
                 <h3>"LEARNING"</h3>
                 {setting("learning rate", "α", "how far each update moves a value toward its target", |c| c.alpha, |c, v| c.alpha = v, b.alpha)}
                 {setting("discount", "γ", "how much later rewards count compared with immediate ones", |c| c.gamma, |c, v| c.gamma = v, b.gamma)}
@@ -179,11 +207,93 @@ pub fn configure_view(ctx: TrainCtx) -> impl IntoView {
                 </div>
                 <div class="row actions">
                     <button class="primary" on:click=move |_| ctx.apply.run(())>"APPLY · START A NEW RAFT"</button>
+                    <button
+                        title="Train a separate raft with these settings and add it to COMPARE; your current raft is kept"
+                        on:click=move |_| ctx.run_experiment.run(())
+                    >
+                        "RUN AS EXPERIMENT ▶"
+                    </button>
                     {move || dirty().then(|| view! { <span class="warning">"unapplied changes"</span> })}
                 </div>
             </section>
         }
         .into_any()
+    }
+}
+
+/// The Observation Builder: which features the raft observes, and what each
+/// choice does to the Q-table's size.
+fn observation_builder(ctx: TrainCtx, o: ObservationStatus) -> impl IntoView {
+    let allowed = o.allowed.clone();
+    let chosen = move || ctx.draft.with(|d| d.as_ref().and_then(|d| d.observation.clone()).unwrap_or_default());
+    let rows = {
+        let allowed = allowed.clone();
+        move || {
+            let chosen = chosen();
+            let parts: Vec<u32> =
+                allowed.iter().filter(|f| chosen.contains(&f.feature)).map(|f| f.cardinality).collect();
+            let total: u64 = parts.iter().map(|&c| u64::from(c)).product();
+            (parts, total)
+        }
+    };
+    let toggle = {
+        let allowed = allowed.clone();
+        move |feature: FeatureDef| {
+            ctx.draft.update(|d| {
+                let Some(d) = d else { return };
+                let mut now = d.observation.clone().unwrap_or_default();
+                if let Some(i) = now.iter().position(|f| *f == feature) {
+                    if now.len() > 1 {
+                        now.remove(i);
+                    }
+                } else {
+                    now.push(feature);
+                }
+                // Keep the level's order, so the same choice always gives the same table.
+                d.observation = Some(allowed.iter().map(|a| a.feature.clone()).filter(|f| now.contains(f)).collect());
+            })
+        }
+    };
+    view! {
+        <div class="observation" class:hl-box=move || ctx.hl(UiElement::Observation)>
+            <h3>"OBSERVATION · WHAT THE RAFT SEES"</h3>
+            <p class="subtitle">"The Q-table has one row for every different thing the raft can observe."</p>
+            {allowed
+                .into_iter()
+                .map(|f| {
+                    let feature = f.feature.clone();
+                    let is_on = {
+                        let feature = feature.clone();
+                        move || chosen().contains(&feature)
+                    };
+                    let last = {
+                        let is_on = is_on.clone();
+                        move || is_on() && chosen().len() == 1
+                    };
+                    let toggle = toggle.clone();
+                    view! {
+                        <label class="setting feature">
+                            <input
+                                type="checkbox"
+                                prop:checked=is_on
+                                disabled=last
+                                on:change=move |_| toggle(feature.clone())
+                            />
+                            <span class="setting-name">{f.name.clone()}</span>
+                            <span class="setting-range">{format!("× {} values", f.cardinality)}</span>
+                        </label>
+                    }
+                })
+                .collect_view()}
+            <p class="table-size">
+                {move || {
+                    let (parts, total) = rows();
+                    let product = parts.iter().map(u32::to_string).collect::<Vec<_>>().join(" × ");
+                    let product = if parts.len() > 1 { format!("{product} = ") } else { String::new() };
+                    format!("Q-table: {product}{total} rows × 4 moves = {} numbers", total * 4)
+                }}
+            </p>
+        </div>
     }
 }
 
@@ -211,6 +321,7 @@ pub fn train_view(ctx: TrainCtx) -> impl IntoView {
             recent.iter().filter(|e| e.reached_goal).count() as f32 / recent.len() as f32
         };
         let trend = rl_training::moving_mean(&curve, CURVE_WINDOW);
+        let goal = ctx.snapshot.with(|s| s.as_ref().map(|s| s.goal_name.clone())).unwrap_or_default();
         view! {
             <section class="training-view" class:hl-box=move || ctx.hl(UiElement::Train)>
                 <h2>"TRAIN"</h2>
@@ -265,12 +376,12 @@ pub fn train_view(ctx: TrainCtx) -> impl IntoView {
                             <div class="tile">
                                 <div class="tile-label">"LAST EPISODE"</div>
                                 <div class="tile-value">{signed(f64::from(last.episode_return))}</div>
-                                <div class="tile-note">{format!("{} moves · {}", last.length, if last.reached_goal { "reached the shore" } else { "did not arrive" })}</div>
+                                <div class="tile-note">{format!("{} moves · {}", last.length, if last.reached_goal { format!("reached {goal}") } else { "did not arrive".into() })}</div>
                             </div>
                             <div class="tile">
                                 <div class="tile-label">{format!("LAST {} EPISODES", recent.len())}</div>
                                 <div class="tile-value">{format!("{:.0}%", reach * 100.0)}</div>
-                                <div class="tile-note">"reached the shore while still exploring"</div>
+                                <div class="tile-note">{format!("reached {goal} while still exploring")}</div>
                             </div>
                         </div>
                         <h3>"LEARNING CURVE"</h3>
@@ -372,8 +483,9 @@ pub fn deploy_view(ctx: TrainCtx) -> impl IntoView {
                                             .iter()
                                             .map(|v| {
                                                 let outcome = match v.outcome {
-                                                    EpisodeOutcome::ReachedGoal => "reached the shore",
+                                                    EpisodeOutcome::ReachedGoal => "arrived",
                                                     EpisodeOutcome::Died => "whirlpool",
+                                                    EpisodeOutcome::Caught => "caught",
                                                     EpisodeOutcome::OutOfTime => "out of time",
                                                 };
                                                 view! {

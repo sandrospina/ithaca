@@ -6,6 +6,9 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod concepts;
+pub use concepts::{ConceptDef, ConceptLibrary};
+
 pub const SCHEMA_VERSION: u32 = 1;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -87,6 +90,10 @@ pub enum UiElement {
     Deploy,
     /// The live Q-learning walkthrough.
     Walkthrough,
+    /// The COMPARE view: experiments and their comparison.
+    Compare,
+    /// The Observation Builder inside CONFIGURE.
+    Observation,
     /// The Q-values of the selected cell.
     QValues,
 }
@@ -152,6 +159,9 @@ pub struct ExperimentDef {
     /// Reward weights to set, by term name.
     #[serde(default)]
     pub rewards: std::collections::BTreeMap<String, f32>,
+    /// The agent's observation features, if not the level's default.
+    #[serde(default)]
+    pub observation: Option<Vec<rl_envs::level::FeatureDef>>,
     pub training_seed: u64,
     pub episodes: u32,
     pub expect: Vec<Expect>,

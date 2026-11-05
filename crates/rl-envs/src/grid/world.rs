@@ -1,11 +1,11 @@
 //! Runtime grid world.
 
 use rl_core::{
-    Action, ActionMask, AgentId, JointAction, Observation, RenderAgent, RenderEvent, RenderModel, Rng, StepEvent,
-    StepInfo, StepResult, StepResults, World, WorldSpec,
+    Action, ActionMask, AgentId, JointAction, Observation, PolicyProvider, RenderAgent, RenderEvent, RenderModel, Rng,
+    StepEvent, StepInfo, StepResult, StepResults, World, WorldSpec,
 };
 
-use super::compiled::CompiledGrid;
+use super::compiled::{CompiledFeature, CompiledGrid};
 use crate::catalogue::RewardTerm;
 use crate::level::{Encoding, FeatureDef, LevelDef};
 use crate::validate::LevelErrors;
@@ -57,6 +57,8 @@ struct AgentState {
     facing: Direction,
     terminated: bool,
     truncated: bool,
+    /// The action taken last step, for the `previous_action` feature.
+    last_action: Option<u32>,
 }
 
 #[derive(Clone, Debug)]
@@ -64,7 +66,7 @@ pub struct GridWorld {
     grid: CompiledGrid,
     agents: Vec<AgentState>,
     steps: u32,
-    /// Reserved for stochastic mechanics (wind, random spawns) from Level 4.
+    /// Seeded on reset. Picks spawn cells; later also wind and other noise.
     rng: Rng,
     last_events: Vec<StepEvent>,
 }
@@ -86,25 +88,49 @@ impl GridWorld {
         self.grid.set_weight(term, weight);
     }
 
+    /// Replaces the agent's observation features. Callers check the level's
+    /// editing rules; see [`GridWorld::apply_edits`].
+    pub fn set_observation(&mut self, features: Vec<FeatureDef>) {
+        self.grid.set_features(features);
+    }
+
     pub fn position(&self, agent: AgentId) -> (i32, i32) {
         self.agents[agent].position
     }
 
+    /// Whether every learner's episode is over. Scripted agents never end it.
     pub fn is_done(&self) -> bool {
-        self.agents.iter().all(|a| a.terminated || a.truncated)
+        self.agents[..self.grid.learners].iter().all(|a| a.terminated || a.truncated)
     }
 
-    /// The current observation of `agent`, built from the level's observation spec.
+    /// Positions of every agent, scripted ones included, in file order.
+    pub fn positions(&self) -> Vec<(i32, i32)> {
+        self.agents.iter().map(|a| a.position).collect()
+    }
+
+    /// The current observation of learner `agent`, built from the level's observation spec.
     pub fn observe(&self, agent: AgentId) -> Observation {
+        self.observe_at(agent, self.agents[agent].position)
+    }
+
+    /// What learner `agent` would observe at `cell`, everything else as it is
+    /// now. The arena uses it to draw the policy for the current situation.
+    pub fn observe_at(&self, agent: AgentId, cell: (i32, i32)) -> Observation {
         let g = &self.grid;
-        let (x, y) = self.agents[agent].position;
+        let (x, y) = cell;
         let cells = (g.width * g.height) as u32;
+        let cell_of = |(x, y): (i32, i32)| (y * g.width + x) as u32;
         let mut features = Vec::new();
         let mut state_index: Option<u32> = Some(0);
-        for f in &g.features {
-            match f {
-                FeatureDef::SelfPosition { encoding } => {
-                    let cell = (y * g.width + x) as u32;
+        // A discrete feature adds one number and multiplies the state space by its cardinality.
+        let discrete = |features: &mut Vec<f32>, state: Option<u32>, value: u32, cardinality: u32| {
+            features.push(value as f32);
+            state.map(|s| s * cardinality + value)
+        };
+        for f in &g.compiled_features {
+            match *f {
+                CompiledFeature::SelfPosition(encoding) => {
+                    let cell = cell_of((x, y));
                     match encoding {
                         Encoding::Index => features.push(cell as f32),
                         Encoding::Normalised => {
@@ -122,13 +148,97 @@ impl GridWorld {
                         Encoding::Normalised => None,
                     };
                 }
+                CompiledFeature::AgentPosition(other) => {
+                    state_index = discrete(&mut features, state_index, cell_of(self.agents[other].position), cells);
+                }
+                CompiledFeature::AgentDirection(other) => {
+                    let (ox, oy) = self.agents[other].position;
+                    let sector = direction_sector(ox - x, oy - y);
+                    state_index = discrete(&mut features, state_index, sector, super::compiled::DIRECTION_VALUES);
+                }
+                CompiledFeature::PreviousAction => {
+                    let value = self.agents[agent].last_action.map_or(0, |a| a + 1);
+                    state_index = discrete(&mut features, state_index, value, super::compiled::PREVIOUS_ACTION_VALUES);
+                }
             }
         }
         Observation { features, state_index }
     }
 
     fn observe_all(&self) -> Vec<Observation> {
-        (0..self.agents.len()).map(|a| self.observe(a)).collect()
+        (0..self.grid.learners).map(|a| self.observe(a)).collect()
+    }
+
+    /// Learners not yet terminated or truncated, sharing a cell with a scripted agent.
+    fn catch(&mut self, events: &mut Vec<StepEvent>, rewards: &mut [f32]) {
+        let catchers: Vec<(usize, (i32, i32))> =
+            self.grid.scripted.iter().map(|s| (s.agent, self.agents[s.agent].position)).collect();
+        let value = self.grid.weight(RewardTerm::CaughtByOpponent);
+        let learners = self.agents[..self.grid.learners].iter_mut().zip(rewards.iter_mut()).enumerate();
+        for (id, (a, reward)) in learners {
+            if a.terminated || a.truncated {
+                continue;
+            }
+            let Some(&(by, at)) = catchers.iter().find(|(_, p)| *p == a.position) else { continue };
+            events.push(StepEvent::Caught { agent: id, by, at });
+            if value != 0.0 {
+                *reward += value;
+                events.push(StepEvent::Reward { agent: id, term: RewardTerm::CaughtByOpponent.name().into(), value });
+            }
+            if self.grid.terminate_on_catch {
+                a.terminated = true;
+            }
+        }
+    }
+
+    /// Scripted agents take their move, each through its behaviour's policy.
+    fn move_scripted(&mut self, events: &mut Vec<StepEvent>) {
+        for k in 0..self.grid.scripted.len() {
+            let s = &self.grid.scripted[k];
+            if !self.steps.is_multiple_of(s.every_n_steps.max(1)) {
+                continue;
+            }
+            let me = s.agent;
+            let from = self.agents[me].position;
+            // It chases the first learner still sailing: every level so far has one.
+            let target = (0..self.grid.learners)
+                .find(|&l| !self.agents[l].terminated && !self.agents[l].truncated)
+                .map(|l| self.agents[l].position);
+            let Some(target) = target else { continue };
+            let (from_cell, target_cell) = (self.grid.index(from), self.grid.index(target));
+            if s.chase.first_move(from_cell, target_cell).is_none() {
+                continue;
+            }
+            // The behaviour is a policy: it sees where it is and where its quarry is, and picks a move.
+            let mut policy: &crate::behaviours::ChaseShortestPath = &s.chase;
+            let observation = policy.observation(from_cell, target_cell);
+            let action = policy.act(&observation, &ActionMask::all(4), &mut Rng::new(0));
+            let dir = Direction::from_action(action);
+            let (dx, dy) = dir.delta();
+            let to = (from.0 + dx, from.1 + dy);
+            if self.grid.in_bounds(to) && !self.grid.is_wall(to) {
+                self.agents[me].position = to;
+                self.agents[me].facing = dir;
+                events.push(StepEvent::Moved { agent: me, from, to });
+            }
+        }
+    }
+}
+
+/// Which way an offset points: 0 here, then 1 north, 2 east, 3 south, 4 west,
+/// by the larger of the two offsets (vertical on a tie).
+fn direction_sector(dx: i32, dy: i32) -> u32 {
+    match (dx, dy) {
+        (0, 0) => 0,
+        _ if dy.abs() >= dx.abs() => {
+            if dy < 0 {
+                1
+            } else {
+                3
+            }
+        }
+        _ if dx > 0 => 2,
+        _ => 4,
     }
 }
 
@@ -137,19 +247,27 @@ impl World for GridWorld {
         self.rng = Rng::new(seed);
         self.steps = 0;
         self.last_events.clear();
-        self.agents = self
-            .grid
-            .spawns
+        let spawns = self.grid.spawns.clone();
+        self.agents = spawns
             .iter()
-            .map(|&position| AgentState { position, facing: Direction::East, terminated: false, truncated: false })
+            .map(|options| {
+                // A single spawn cell draws nothing, so levels without choices replay as before.
+                let position = if options.len() == 1 {
+                    options[0]
+                } else {
+                    options[self.rng.below(options.len() as u32) as usize]
+                };
+                AgentState { position, facing: Direction::East, terminated: false, truncated: false, last_action: None }
+            })
             .collect();
         self.observe_all()
     }
 
     fn step(&mut self, actions: &JointAction) -> StepResults {
-        assert_eq!(actions.len(), self.agents.len(), "one action per agent is required");
+        let learners = self.grid.learners;
+        assert_eq!(actions.len(), learners, "one action per learner is required");
         let mut events = Vec::new();
-        let mut rewards = vec![0.0f32; self.agents.len()];
+        let mut rewards = vec![0.0f32; learners];
 
         if !self.is_done() {
             self.steps += 1;
@@ -158,6 +276,7 @@ impl World for GridWorld {
                     continue;
                 }
                 let dir = Direction::from_action(*action);
+                self.agents[id].last_action = Some(dir as u32);
                 let from = self.agents[id].position;
                 let (dx, dy) = dir.delta();
                 let to = (from.0 + dx, from.1 + dy);
@@ -202,8 +321,15 @@ impl World for GridWorld {
                     }
                 }
             }
+            // A learner that walks into an opponent is caught; then the
+            // opponents move, and may catch a learner where it stands.
+            if !self.grid.scripted.is_empty() {
+                self.catch(&mut events, &mut rewards);
+                self.move_scripted(&mut events);
+                self.catch(&mut events, &mut rewards);
+            }
             if self.steps >= self.grid.max_steps {
-                for a in &mut self.agents {
+                for a in &mut self.agents[..learners] {
                     if !a.terminated {
                         a.truncated = true;
                     }
@@ -216,7 +342,7 @@ impl World for GridWorld {
         StepResults {
             agents: observations
                 .into_iter()
-                .zip(&self.agents)
+                .zip(&self.agents[..learners])
                 .zip(rewards)
                 .map(|((observation, a), reward)| StepResult {
                     observation,

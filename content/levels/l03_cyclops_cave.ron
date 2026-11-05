@@ -1,0 +1,64 @@
+// Level 3 — The Cyclops' Cave.
+// A ring of tunnels around a rock pillar, with two ways to the cave mouth.
+// Polyphemus waits in one of them, picked by each voyage's seed, and chases
+// the raft by the shortest path. A raft that knows only where it is cannot
+// tell which way is safe; one that also observes Polyphemus can.
+Level(
+  schema: 1,
+  id: "l03_cyclops_cave",
+  title: "The Cyclops' Cave",
+  goal_name: "the cave mouth",
+  engine: Grid(width: 7, height: 7, moves: Four),
+  map: [
+    "#######",
+    "#S..C.#",
+    "#.###.#",
+    "#.###.#",
+    "#C###.#",
+    "#....G#",
+    "#######",
+  ],
+  legend: {
+    'S': Spawn(agent: "odysseus"),
+    'C': Spawn(agent: "polyphemus"),
+    'G': Goal(term: "goal_reached"),
+  },
+  agents: {
+    "odysseus": (controller: Learner, glyph: agent),
+    "polyphemus": (controller: Scripted(behaviour: chase_shortest_path(every_n_steps: 1)), glyph: adversary),
+  },
+  reward: { "goal_reached": 10.0, "step": -1.0, "caught_by_opponent": -10.0 },
+  reward_labels: {
+    "goal_reached": "escaping through the cave mouth",
+    "caught_by_opponent": "caught by Polyphemus",
+  },
+  // The deliberately inadequate default: the raft knows only where it is.
+  observation: [ self_position(encoding: Index) ],
+  termination: [ GoalReached, CaughtByOpponent ],
+  truncation: (max_steps: 50),
+  player_editable: (
+    observation: (allowed: [
+      self_position(encoding: Index),
+      agent_position(agent: "polyphemus"),
+      agent_direction(agent: "polyphemus"),
+      previous_action,
+    ]),
+    hyperparameters: (alpha: (0.01, 1.0), gamma: (0.0, 0.999), epsilon: (0.0, 1.0)),
+  ),
+  pilot: Agent,
+  challenge: (
+    objective: "Escape the cave in 8 of 10 test voyages, and show by experiment what the raft must see to do it.",
+    goal: Tasks([
+      CompareObservations(agent: "polyphemus", min_gain: 3),
+      TrainAgent(
+        threshold: 0.8,
+        eval_episodes: 10,
+        eval_seeds: Fixed(1000),
+        success: ReachGoal,
+        label: "escape the cave",
+      ),
+    ]),
+  ),
+  budget: (episodes: 2000, stars: [2000, 1000, 500]),
+  tutorial: "l03_cyclops_cave",
+)

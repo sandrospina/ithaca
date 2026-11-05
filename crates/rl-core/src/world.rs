@@ -29,6 +29,13 @@ pub enum StepEvent {
         agent: AgentId,
         at: (i32, i32),
     },
+    /// Another agent caught this one; its episode ends.
+    Caught {
+        agent: AgentId,
+        /// Index of the catcher among all the world's agents, scripted ones included.
+        by: usize,
+        at: (i32, i32),
+    },
     /// The agent ended a step on a hazard cell.
     OnHazard {
         agent: AgentId,
