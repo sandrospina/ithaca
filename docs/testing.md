@@ -44,7 +44,8 @@ window at least about 1200 × 800.
 
 1. **Loads**: the voyage map, the arena and the briefing appear within a few seconds, with no error in the side panel.
 2. **Level 0**: steer with the arrow keys or W A S D to the shore by the shortest route; the level completes.
-3. **Level 1**:
+3. **Level 1**: the first two tutorial steps show no phase buttons; ANALYSE appears at step 3 and CONFIGURE,
+   TRAIN and DEPLOY at step 7.
    - ANALYSE: run a batch of 100 random voyages; the statistics and charts appear.
    - TRAIN: train to the budget; the learning curve rises and the arrows on the arena point to the shore.
    - STEP THROUGH: step lines with Space and moves with Enter; the code values change line by line.

@@ -180,6 +180,7 @@ input[type="number"] { width: 7em; }
 .row { display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; }
 
 .phase { letter-spacing: 0.15em; }
+.hidden { display: none !important; }
 
 .log {
   font-size: 12px;

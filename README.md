@@ -33,6 +33,9 @@ Milestones 0 and 1 are in place:
 - Q-value inspector: click any cell to read its four Q-values.
 - Side panels (the RL loop, Q-values, voyage) fold to a one-line summary. They start folded where they repeat
   what the page already shows (the walkthrough, and the panel views), and a tutorial step that points into one unfolds it.
+- The phase buttons appear as the tutorial reaches them: ANALYSE when the tutorial first points at measuring, and
+  CONFIGURE, TRAIN and DEPLOY (with the trained raft's controls and the Q-values) when it first points at learning.
+  In Level 1, the random raft's steps show none of the learning controls. A completed level or a trained raft shows them all.
 - Tutorial predictions and guided experiments: the player commits to a prediction, then runs a pinned experiment
   that answers it. Every experiment states what it must show, and a test runs them all.
 - Trained rafts are saved per level in the browser (IndexedDB) and continue training exactly where they stopped.

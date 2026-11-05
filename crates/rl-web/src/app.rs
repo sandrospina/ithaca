@@ -32,6 +32,34 @@ use crate::worker::SimWorker;
 /// Pause between agent steps when watching an agent sail, in milliseconds.
 const AUTOPILOT_MS: u64 = 90;
 
+/// The phases come in two stages: measuring the untrained agent, then learning.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Stage {
+    /// ANALYSE.
+    Measure,
+    /// CONFIGURE, TRAIN and DEPLOY.
+    Learn,
+}
+
+impl Stage {
+    /// The stage a tutorial highlight points into.
+    fn of(el: UiElement) -> Option<Stage> {
+        match el {
+            UiElement::Analyse | UiElement::BestSeed | UiElement::Quiz => Some(Stage::Measure),
+            UiElement::Configure
+            | UiElement::Rewards
+            | UiElement::Train
+            | UiElement::Walkthrough
+            | UiElement::Deploy => Some(Stage::Learn),
+            _ => None,
+        }
+    }
+
+    fn of_view(v: View) -> Stage {
+        if v == View::Analyse { Stage::Measure } else { Stage::Learn }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum View {
     Arena,
@@ -864,6 +892,35 @@ pub fn App() -> impl IntoView {
     let next_level = move || level_index(&level_id.get()).map(|i| i + 1).filter(|&i| i < LEVELS.len());
     let pilot = move || snapshot.with(|s| s.as_ref().map(|s| s.pilot));
 
+    // ---- phases appear as the tutorial reaches them
+    // The furthest tutorial step reached in this level: going back keeps the phases already shown.
+    let reached = RwSignal::new((String::new(), 0usize));
+    Effect::new(move |_| {
+        let (id, i) = (level_id.get(), tutorial_index.get());
+        reached.update(|r| *r = if r.0 == id { (id, r.1.max(i)) } else { (id, i) });
+    });
+    // A stage of phases is shown from the first step that points into it. A stage the tutorial
+    // never points into is shown from the start.
+    let stage_reached = move |stage: Stage| {
+        let first = tutorial.with(|t| {
+            t.as_ref()?.steps.iter().position(|s| s.highlight().iter().any(|&e| Stage::of(e) == Some(stage)))
+        });
+        first.is_none_or(|i| i <= reached.with(|r| r.1))
+    };
+    let phase_shown = move |v: View| {
+        if pilot() != Some(Pilot::Agent) {
+            return false;
+        }
+        let here = view.get() == v || (v == View::Train && view.get() == View::Walkthrough);
+        let stage = Stage::of_view(v);
+        here || level_complete()
+            || trained()
+            || stage_reached(stage)
+            || (stage == Stage::Measure && task_states().iter().any(|t| t.done))
+    };
+    // The trained raft's controls and its Q-values belong to the learning stage too.
+    let learning = move || phase_shown(View::Train);
+
     // ---- decluttering: the objective opens on demand, side panels fold
     let objective_open = RwSignal::new(false);
     Effect::new(move |_| {
@@ -1505,7 +1562,7 @@ pub fn App() -> impl IntoView {
                     </Fold>
 
                     {move || {
-                        (pilot() == Some(Pilot::Agent))
+                        (pilot() == Some(Pilot::Agent) && learning())
                             .then(|| {
                                 view! {
                                     <Fold
@@ -1586,6 +1643,7 @@ pub fn App() -> impl IntoView {
                                                     </button>
                                                     <button
                                                         class="primary"
+                                                        class:hidden=move || !learning()
                                                         disabled=move || !trained()
                                                         title=move || if trained() { "" } else { "Train a raft first" }
                                                         on:click=move |_| start_autopilot(true)
@@ -1605,7 +1663,7 @@ pub fn App() -> impl IntoView {
                                                 "steering is off · an agent sails"
                                             }
                                         }}
-                                        <label class="toggle">
+                                        <label class="toggle" class:hidden=move || !learning()>
                                             <input
                                                 type="checkbox"
                                                 prop:checked=move || show_policy.get()
@@ -1652,12 +1710,12 @@ pub fn App() -> impl IntoView {
                         view! {
                             <button
                                 class="phase"
+                                class:hidden=move || !phase_shown(v)
                                 class:active=move || {
                                     view.get() == v || (v == View::Train && view.get() == View::Walkthrough)
                                 }
                                 class:hl-box=move || is_hl(el)
-                                disabled=move || pilot() != Some(Pilot::Agent)
-                                title=move || if pilot() == Some(Pilot::Agent) { about } else { "In this level you are the pilot" }
+                                title=about
                                 on:click=move |_| view.set(v)
                             >
                                 {label}
@@ -1666,7 +1724,9 @@ pub fn App() -> impl IntoView {
                     })
                     .collect_view()}
                 <span style="flex: 1"></span>
-                <span class="status">{format!("TRAINING ON: {target_label}")}</span>
+                <span class="status" class:hidden=move || !phase_shown(View::Train)>
+                    {format!("TRAINING ON: {target_label}")}
+                </span>
                 <button
                     class="quiet"
                     class:active=move || view.get() == View::StyleSheet
