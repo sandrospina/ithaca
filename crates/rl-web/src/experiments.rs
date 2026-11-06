@@ -65,6 +65,9 @@ pub fn settings_line(c: &ExperimentConfig) -> String {
     if let Some(features) = &c.edits.observation {
         parts.push(observation_line(features));
     }
+    if let Some(w) = c.edits.wind {
+        parts.push(wind_line(w));
+    }
     parts.push(format!("{} episodes · seed {}", c.episodes, c.seed));
     parts.join(" · ")
 }
@@ -81,6 +84,11 @@ pub fn sees(features: &[FeatureDef], agent: &str) -> bool {
         FeatureDef::AgentPosition { agent: a } | FeatureDef::AgentDirection { agent: a } => a == agent,
         _ => false,
     })
+}
+
+/// The training wind, in a few words: "trains in calm water", "trains in 20% wind".
+pub fn wind_line(slip: f32) -> String {
+    if slip == 0.0 { "trains in calm water".into() } else { format!("trains in {:.0}% wind", slip * 100.0) }
 }
 
 /// What an agent observes, in a few words.
@@ -137,6 +145,28 @@ impl ExperimentLog {
 
     pub fn remove(&mut self, id: u32) {
         self.runs.retain(|r| r.id != id);
+    }
+
+    /// The largest gain in test arrivals from training in a stronger wind, over
+    /// pairs of runs whose settings differ only in the training wind. `level`
+    /// is the level's own slip, used by runs that did not change it.
+    pub fn wind_gain(&self, level: f32) -> Option<i64> {
+        let wind = |r: &LoggedRun| r.config.edits.wind.unwrap_or(level);
+        let without_wind = |r: &LoggedRun| {
+            let mut c = r.config.clone();
+            c.edits.wind = None;
+            c
+        };
+        let mut best = None;
+        for a in &self.runs {
+            for b in self.runs.iter().filter(|b| wind(b) < wind(a)) {
+                if without_wind(a) == without_wind(b) {
+                    let gain = i64::from(a.evaluation.reached) - i64::from(b.evaluation.reached);
+                    best = Some(best.map_or(gain, |g: i64| g.max(gain)));
+                }
+            }
+        }
+        best
     }
 
     /// The largest gain in test arrivals from observing `agent`, over pairs of

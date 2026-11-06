@@ -25,7 +25,7 @@ fn cyclops() -> FeatureDef {
 
 /// Test escapes of a raft trained with `observation`.
 fn escapes(observation: Vec<FeatureDef>, seed: u64, episodes: u32) -> u32 {
-    let edits = PlayerEdits { rewards: vec![], observation: Some(observation) };
+    let edits = PlayerEdits { observation: Some(observation), ..Default::default() };
     let c = ExperimentConfig::q_learning("l03_cyclops_cave", CAVE, edits, QLearningConfig::default(), seed, episodes)
         .unwrap();
     run_experiment(&c, CAVE).unwrap().evaluation.reached
@@ -87,7 +87,7 @@ fn the_observation_describes_polyphemus() {
     let mut world = rl_envs::load_world(CAVE).unwrap();
     world
         .apply_edits(
-            &PlayerEdits { rewards: vec![], observation: Some(vec![position(), direction()]) },
+            &PlayerEdits { observation: Some(vec![position(), direction()]), ..Default::default() },
             EditMode::Strict,
         )
         .unwrap();
@@ -103,7 +103,7 @@ fn the_observation_describes_polyphemus() {
 #[test]
 fn only_the_allowed_features_can_be_observed() {
     let mut world = rl_envs::load_world(CAVE).unwrap();
-    let edit = |features| PlayerEdits { rewards: vec![], observation: Some(features) };
+    let edit = |features| PlayerEdits { observation: Some(features), ..Default::default() };
     let odysseus = FeatureDef::AgentPosition { agent: "odysseus".into() };
     assert!(world.apply_edits(&edit(vec![position(), odysseus]), EditMode::Strict).is_err());
     assert!(world.apply_edits(&edit(vec![]), EditMode::Strict).is_err(), "it must see something");

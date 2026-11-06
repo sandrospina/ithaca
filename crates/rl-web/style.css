@@ -512,3 +512,10 @@ body:not(.plain) .chart .curve { filter: none; }
 .concept-body { padding: 0.25rem 0.5rem 0.75rem; }
 .concept-body p { color: var(--shell-fg); max-width: 60rem; }
 .concept-body .reading { color: var(--shell-dim); font-size: 12px; }
+
+/* ---- Move tester (windy levels) */
+.move-tester { margin-top: 0.6rem; }
+.move-tester button { font-size: 12px; }
+table.stats.outcomes { margin-top: 0.3rem; width: 100%; }
+table.stats.outcomes th, table.stats.outcomes td { padding: 0.15rem 0.35rem; font-size: 11px; }
+table.stats.outcomes td.left { text-align: left; }

@@ -57,6 +57,9 @@ pub struct RenderModel {
     /// Cells that pay reward while the agent is on them.
     #[serde(default)]
     pub lures: Vec<(i32, i32)>,
+    /// Cells where wind may turn a move aside.
+    #[serde(default)]
+    pub wind: Vec<(i32, i32)>,
     pub agents: Vec<RenderAgent>,
     pub events: Vec<RenderEvent>,
 }

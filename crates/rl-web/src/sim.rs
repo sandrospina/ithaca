@@ -12,9 +12,9 @@ use rl_training::{
 
 use crate::content;
 use crate::protocol::{
-    Baseline, BestRoute, CellPolicy, DeployReport, ExperimentResult, FeatureOption, LessonMode, LessonMove,
-    LessonState, Objective, ObservationStatus, Outcome, RewardSetting, SAVE_SCHEMA, SailedBy, SavedRaft, SimRequest,
-    SimResponse, Snapshot, TaskResult, TrainingStatus,
+    Baseline, BestRoute, CellPolicy, DeployReport, ExperimentResult, FeatureOption, Landing, LessonMode, LessonMove,
+    LessonState, MoveOutcomes, Objective, ObservationStatus, Outcome, OutcomeReport, RewardSetting, SAVE_SCHEMA,
+    SailedBy, SavedRaft, SimRequest, SimResponse, Snapshot, TaskResult, TrainingStatus, WindStatus,
 };
 
 pub use rl_envs::level_hash;
@@ -43,6 +43,7 @@ pub fn experiment_spec(level_id: &str, def: &rl_tutorial::ExperimentDef) -> Resu
     let edits = PlayerEdits {
         rewards: def.rewards.iter().map(|(k, v)| (k.clone(), *v)).collect(),
         observation: def.observation.clone(),
+        wind: def.wind,
     };
     ExperimentConfig::q_learning(level_id, entry.level_source, edits, config, def.training_seed, def.episodes)
         .map_err(|e| errors_text(&e))
@@ -250,11 +251,11 @@ impl SimCore {
                     self.step(action.discrete(), by);
                 }
             }
-            SimRequest::Configure { config, rewards, observation, training_seed } => {
+            SimRequest::Configure { config, rewards, observation, wind, training_seed } => {
                 if self.world.is_none() {
                     return no_level();
                 }
-                if let Err(e) = self.configure(config, PlayerEdits { rewards, observation }, training_seed) {
+                if let Err(e) = self.configure(config, PlayerEdits { rewards, observation, wind }, training_seed) {
                     return SimResponse::Error(e);
                 }
                 let seed = self.seed;
@@ -279,6 +280,7 @@ impl SimCore {
                 return SimResponse::Lesson(Box::new(self.snapshot()));
             }
             SimRequest::Experiment { config, adopt } => return self.experiment(&config, adopt),
+            SimRequest::Outcomes { cell, trials } => return self.outcomes(cell, trials),
             SimRequest::Replay { seed, actions, edits } => {
                 let Some(world) = &self.world else { return no_level() };
                 let mut world = world.clone();
@@ -434,6 +436,55 @@ impl SimCore {
         }
     }
 
+    /// Tries each move `trials` times from `cell`, each try on its own seed,
+    /// in the level's real wind: the sea every test sails in.
+    fn outcomes(&self, cell: (i32, i32), trials: u32) -> SimResponse {
+        let Some(world) = &self.world else { return no_level() };
+        let g = world.grid();
+        if !g.in_bounds(cell) || g.is_wall(cell) {
+            return SimResponse::Error("choose an open cell to try moves from".into());
+        }
+        let trials = trials.clamp(1, 1_000);
+        let ActionSpace::Discrete { labels, .. } = &world.spec().agents[0].action;
+        let mut probe = rl_training::test_world(world);
+        let slip = probe.grid().slip;
+        let moves = (0..4u32)
+            .map(|a| {
+                let mut landings: Vec<Landing> = Vec::new();
+                let mut total = 0.0;
+                for k in 0..u64::from(trials) {
+                    probe.reset(k + 1);
+                    probe.place(0, cell);
+                    let r = probe.step(&vec![rl_core::Action::Discrete(a)]);
+                    total += r.agents[0].reward;
+                    let to = probe.position(0);
+                    let note = r
+                        .info
+                        .events
+                        .iter()
+                        .find_map(|e| match e {
+                            StepEvent::Died { .. } => Some("whirlpool".to_string()),
+                            StepEvent::Caught { .. } => Some("caught".to_string()),
+                            StepEvent::GoalReached { .. } => Some(g.goal_name.clone()),
+                            _ => None,
+                        })
+                        .unwrap_or_default();
+                    match landings.iter_mut().find(|l| l.cell == to) {
+                        Some(l) => l.count += 1,
+                        None => landings.push(Landing { cell: to, count: 1, note }),
+                    }
+                }
+                landings.sort_by_key(|l| std::cmp::Reverse(l.count));
+                MoveOutcomes {
+                    action: labels.get(a as usize).cloned().unwrap_or_default(),
+                    landings,
+                    mean_reward: total / trials as f32,
+                }
+            })
+            .collect();
+        SimResponse::Outcomes(Box::new(OutcomeReport { cell, trials, slip, moves }))
+    }
+
     /// The current raft, as of its last finished episode.
     fn export(&self) -> Option<SavedRaft> {
         let t = self.trainer.as_ref()?;
@@ -453,6 +504,7 @@ impl SimCore {
             curve: t.curve.clone(),
             observation: Some(world.grid().features.clone()),
             spec_hash: Some(world.spec().agents[0].spec_hash()),
+            wind: Some(world.grid().slip),
         })
     }
 
@@ -465,7 +517,8 @@ impl SimCore {
         if self.trainer.as_ref().is_some_and(|t| !t.curve.is_empty() || t.lesson.is_some()) {
             return Err("a raft is already training · the saved raft was not loaded".into());
         }
-        let edits = PlayerEdits { rewards: save.rewards.clone(), observation: save.observation.clone() };
+        let edits =
+            PlayerEdits { rewards: save.rewards.clone(), observation: save.observation.clone(), wind: save.wind };
         self.configure(save.learner.config, edits, save.training_seed)?;
         let world = self.world.as_ref().expect("checked");
         if let Some(saved) = save.spec_hash
@@ -498,7 +551,8 @@ impl SimCore {
             return SimResponse::Error("this level has no training tasks".into());
         };
         let best_return = rl_training::shortest_route_return(world);
-        let mut probe = world.clone();
+        // Deployment sails the level's own wind, whatever the raft trained in.
+        let mut probe = rl_training::test_world(world);
         let mut voyages = None;
         let mut results = Vec::new();
         for (i, task) in tasks.iter().enumerate() {
@@ -618,7 +672,7 @@ impl SimCore {
             self.log = vec!["the episode is over · press R to sail again".into()];
             return;
         }
-        let ActionSpace::Discrete { labels, .. } = &world.spec().agents[0].action;
+        let ActionSpace::Discrete { labels, .. } = world.spec().agents[0].action.clone();
         let label = labels.get(action as usize).cloned();
         let result = world.step(&vec![rl_core::Action::Discrete(action)]);
         let r = &result.agents[0];
@@ -652,6 +706,9 @@ impl SimCore {
             StepEvent::Moved { agent: 0, to, .. } => format!("moved to ({}, {})", to.0, to.1),
             StepEvent::Moved { agent, to, .. } => format!("{} moves to ({}, {})", names[*agent], to.0, to.1),
             StepEvent::Caught { by, .. } => format!("caught by {}", names[*by]),
+            StepEvent::Gust { actual, .. } => {
+                format!("a gust turns the raft {}", labels.get(*actual as usize).map_or("aside", String::as_str))
+            }
             StepEvent::BumpedWall { .. } => "bumped into the edge · the move is wasted".into(),
             StepEvent::GoalReached { .. } => format!("reached {goal}"),
             StepEvent::Died { .. } => "swallowed by a whirlpool".into(),
@@ -696,6 +753,7 @@ impl SimCore {
             table_size: t.learner.table.states * t.learner.table.actions,
             curve: t.curve.clone(),
             policy,
+            wind: g.player_editable.wind.map(|range| WindStatus { slip: g.slip, range, level: g.level_slip }),
             observation: g.player_editable.observation.as_ref().map(|edit| ObservationStatus {
                 features: g.features.clone(),
                 allowed: edit
@@ -862,6 +920,7 @@ mod tests {
             config: QLearningConfig::default(),
             rewards: rewards.iter().map(|(n, w)| (n.to_string(), *w)).collect(),
             observation: None,
+            wind: None,
             training_seed: 1,
         }))
     }
@@ -963,6 +1022,7 @@ mod tests {
             config: QLearningConfig::default(),
             rewards: vec![],
             observation: Some(eyes),
+            wind: None,
             training_seed: 1,
         }));
         assert_eq!(s.training.unwrap().table_size, 245 * 4);
@@ -971,6 +1031,38 @@ mod tests {
         let report = deploy(&mut sim);
         assert!(report.tasks[0].passed, "{report:?}");
         assert_eq!(report.stars, Some(3), "500 episodes earns every star");
+    }
+
+    #[test]
+    fn level_four_tests_in_the_real_wind() {
+        let mut sim = SimCore::default();
+        let s = load(&mut sim, "l04_bag_of_winds");
+        let w = s.training.unwrap().wind.expect("the training wind is editable here");
+        assert_eq!((w.slip, w.level, w.range), (0.2, 0.2, (0.0, 0.4)));
+
+        // Trained in calm water, deployed in the real wind: lost too often.
+        let s = snap(sim.handle(SimRequest::Configure {
+            config: QLearningConfig::default(),
+            rewards: vec![],
+            observation: None,
+            wind: Some(0.0),
+            training_seed: 1,
+        }));
+        assert_eq!(s.training.unwrap().wind.unwrap().slip, 0.0);
+        train(&mut sim, 800);
+        let calm = deploy(&mut sim);
+        assert!(!calm.tasks[0].passed, "{calm:?}");
+        assert!(calm.voyages.iter().any(|v| v.outcome == rl_training::EpisodeOutcome::Died));
+
+        // The move tester sails the real wind, even while the raft trains in calm water.
+        let SimResponse::Outcomes(r) = sim.handle(SimRequest::Outcomes { cell: (3, 3), trials: 100 }) else {
+            panic!("expected outcomes");
+        };
+        let east = &r.moves[1];
+        assert_eq!(east.landings.len(), 3, "in the wind: east, north or a whirlpool");
+        assert!(east.landings.iter().any(|l| l.note == "whirlpool" && l.count > 0));
+        assert_eq!(east.landings.iter().map(|l| l.count).sum::<u32>(), 100);
+        assert!(matches!(sim.handle(SimRequest::Outcomes { cell: (0, 0), trials: 10 }), SimResponse::Error(_)));
     }
 
     fn lesson(sim: &mut SimCore, mode: LessonMode) -> Snapshot {

@@ -1,0 +1,59 @@
+// Level 4 — The Bag of Winds. Stochastic transitions and expected return.
+// The short way to the harbour runs through windy water along a row of
+// whirlpools; a calm detour along the north shore is longer. In windy cells
+// a gust may turn a move 90° aside. A raft trained in calm water takes the
+// short way and is lost in the real wind; a raft trained in the wind learns
+// that the detour is worth more on average.
+Level(
+  schema: 1,
+  id: "l04_bag_of_winds",
+  title: "The Bag of Winds",
+  goal_name: "the harbour",
+  engine: Grid(width: 9, height: 6, moves: Four),
+  map: [
+    "#########",
+    "#.......#",
+    "#~~~~~~~#",
+    "#S~~~~~G#",
+    "#XXXXXXX#",
+    "#########",
+  ],
+  legend: {
+    'S': Spawn(agent: "odysseus"),
+    'G': Goal(term: "goal_reached"),
+    '~': Wind,
+    'X': Hazard(lethal: true),
+  },
+  agents: {
+    "odysseus": (controller: Learner, glyph: agent),
+  },
+  reward: { "goal_reached": 10.0, "step": -1.0, "death": -10.0 },
+  reward_labels: {
+    "goal_reached": "reaching the harbour",
+    "death": "swallowed by a whirlpool",
+  },
+  observation: [ self_position(encoding: Index) ],
+  wind: (slip: 0.2),
+  termination: [ GoalReached, Death ],
+  truncation: (max_steps: 60),
+  player_editable: (
+    wind: (0.0, 0.4),
+    hyperparameters: (alpha: (0.01, 1.0), gamma: (0.0, 0.999), epsilon: (0.0, 1.0)),
+  ),
+  pilot: Agent,
+  challenge: (
+    objective: "Bring the raft into the harbour in 9 of 10 test voyages through the real wind, and show by experiment why training in the wind matters.",
+    goal: Tasks([
+      CompareWind(min_gain: 2),
+      TrainAgent(
+        threshold: 0.9,
+        eval_episodes: 10,
+        eval_seeds: Fixed(1000),
+        success: ReachGoal,
+        label: "reach the harbour through the wind",
+      ),
+    ]),
+  ),
+  budget: (episodes: 1500, stars: [1500, 800, 400]),
+  tutorial: "l04_bag_of_winds",
+)

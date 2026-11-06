@@ -21,8 +21,8 @@ use crate::experiments::{ExperimentLog, Selection};
 use crate::lesson_code::{self, LineStep, Reveal, UPDATE};
 use crate::library::{LibraryCtx, library_view};
 use crate::protocol::{
-    BatchReport, DeployReport, ExperimentResult, GoalDef, LessonMode, LessonState, Outcome, Pilot, PlayerEdits,
-    QLearningConfig, SailedBy, SavedRaft, SimRequest, SimResponse, Snapshot,
+    BatchReport, DeployReport, ExperimentResult, GoalDef, LessonMode, LessonState, Outcome, OutcomeReport, Pilot,
+    PlayerEdits, QLearningConfig, SailedBy, SavedRaft, SimRequest, SimResponse, Snapshot,
 };
 use crate::render::{self, Effects, Highlights, Layers, Marks, RenderState, Updated};
 use crate::sim::experiment_spec;
@@ -55,7 +55,9 @@ impl Stage {
             | UiElement::Walkthrough
             | UiElement::Deploy
             | UiElement::Compare
-            | UiElement::Observation => Some(Stage::Learn),
+            | UiElement::Observation
+            | UiElement::Wind
+            | UiElement::Outcomes => Some(Stage::Learn),
             _ => None,
         }
     }
@@ -113,7 +115,7 @@ impl SidePanel {
                 UiElement::Step,
                 UiElement::Episode,
             ],
-            SidePanel::QValues => &[UiElement::QValues],
+            SidePanel::QValues => &[UiElement::QValues, UiElement::Outcomes],
             SidePanel::Voyage => &[UiElement::Seed, UiElement::Autopilot, UiElement::Controls],
         }
     }
@@ -320,6 +322,9 @@ fn experiment_settings(def: &rl_tutorial::ExperimentDef) -> String {
     if let Some(features) = &def.observation {
         parts.push(format!("observes {}", features.iter().map(|f| f.name()).collect::<Vec<_>>().join(" + ")));
     }
+    if let Some(w) = def.wind {
+        parts.push(crate::experiments::wind_line(w));
+    }
     parts.push(format!("{} episodes · training seed {}", def.episodes, def.training_seed));
     parts.join(" · ")
 }
@@ -401,6 +406,7 @@ pub fn App() -> impl IntoView {
     let compare_pending = RwSignal::new(None::<Pending>);
     let reruns = RwSignal::new(BTreeMap::<u32, bool>::new());
     let compare_episodes = RwSignal::new(500u32);
+    let outcome_report = RwSignal::new(None::<OutcomeReport>);
 
     // ---- saved rafts
     let saved_key = StoredValue::new(None::<String>);
@@ -510,6 +516,10 @@ pub fn App() -> impl IntoView {
                     Some(Pending::Adopt { .. }) => adopted(s),
                     None => snapshot.set(Some(*s)),
                 }
+            }
+            SimResponse::Outcomes(r) => {
+                error.set(None);
+                outcome_report.set(Some(*r));
             }
             SimResponse::Export(save) => {
                 if let Ok(json) = serde_json::to_string(&*save) {
@@ -773,6 +783,7 @@ pub fn App() -> impl IntoView {
         selection.set(Selection::default());
         reruns.set(Default::default());
         compare_pending.set(None);
+        outcome_report.set(None);
         compare_episodes.set(
             content::level(&id)
                 .and_then(|e| rl_envs::LevelDef::parse(e.level_source).ok())
@@ -829,6 +840,7 @@ pub fn App() -> impl IntoView {
                 config: QLearningConfig::default(),
                 rewards,
                 observation: None,
+                wind: None,
                 training_seed: 1,
             });
         }
@@ -981,7 +993,8 @@ pub fn App() -> impl IntoView {
             };
             let Some(goal) = def.challenge.map(|c| c.goal) else { return };
             let mut newly = false;
-            progress.update(|p| newly = p.record_experiments(&goal, log, &def.observation));
+            let slip = def.wind.map_or(0.0, |w| w.slip);
+            progress.update(|p| newly = p.record_experiments(&goal, log, &def.observation, slip));
             if newly {
                 just_completed.set(true);
             }
@@ -1020,6 +1033,7 @@ pub fn App() -> impl IntoView {
                 config: d.config,
                 rewards: d.rewards,
                 observation: d.observation,
+                wind: d.wind,
                 training_seed: d.training_seed,
             });
         }),
@@ -1473,6 +1487,55 @@ pub fn App() -> impl IntoView {
     };
 
     // The inspector: the four Q-values of one cell, laid out as a compass.
+    // On windy levels: try each move many times from the inspected cell.
+    let move_tester = move || {
+        let windy = snapshot.with(|s| s.as_ref().is_some_and(|s| !s.render.wind.is_empty()));
+        if !windy {
+            return None;
+        }
+        let cell =
+            inspected.get().map(|(c, _)| c.cell).or_else(|| snapshot.with(|s| s.as_ref().map(|s| s.position)))?;
+        let report = outcome_report.get().filter(|r| r.cell == cell);
+        Some(view! {
+            <div class="move-tester" class:hl-box=move || is_hl(UiElement::Outcomes)>
+                <button on:click=move |_| send(SimRequest::Outcomes { cell, trials: 100 })>
+                    {format!("TRY EACH MOVE 100× FROM {}", lesson_code::cell(cell))}
+                </button>
+                {report.map(|r| {
+                    view! {
+                        <p class="subtitle">
+                            {format!("{} tries per move, in the real {:.0}% wind: where the raft ended up", r.trials, r.slip * 100.0)}
+                        </p>
+                        <table class="stats outcomes">
+                            <tbody>
+                                {r.moves
+                                    .iter()
+                                    .map(|m| {
+                                        let landings = m
+                                            .landings
+                                            .iter()
+                                            .map(|l| {
+                                                let note = if l.note.is_empty() { String::new() } else { format!(" {}", l.note) };
+                                                format!("{} {}%{note}", lesson_code::cell(l.cell), l.count * 100 / r.trials.max(1))
+                                            })
+                                            .collect::<Vec<_>>()
+                                            .join(" · ");
+                                        view! {
+                                            <tr>
+                                                <th scope="row">{m.action.to_uppercase()}</th>
+                                                <td class="left">{landings}</td>
+                                                <td>{format!("mean r {}", signed(f64::from(m.mean_reward)))}</td>
+                                            </tr>
+                                        }
+                                    })
+                                    .collect_view()}
+                            </tbody>
+                        </table>
+                    }
+                })}
+            </div>
+        })
+    };
     let q_inspector = move || {
         inspected.get().map(|(c, selected)| {
             let best = c.values.iter().copied().fold(f32::NEG_INFINITY, f32::max);
@@ -1869,6 +1932,7 @@ pub fn App() -> impl IntoView {
                                             || view! { <p class="subtitle">"No Q-table to show yet."</p> }.into_any(),
                                             IntoAny::into_any,
                                         )}
+                                        {move || move_tester()}
                                     </Fold>
                                 }
                             })

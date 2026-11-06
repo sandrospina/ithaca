@@ -191,3 +191,41 @@ Each concept is taught in one level's tutorial and unlocks in the game when the 
 - **Intuition.** To know what a setting does, run two experiments that differ only in that setting. Same seed, same budget, same test seeds. Then any difference in the results was caused by that setting. Rerun a specification to check it reproduces exactly.
 - **Math.** A specification fixes the seed, the settings and the test seeds, so a run is a deterministic function of it. Comparing two runs that differ in one input isolates that input's effect, up to the variation across seeds, which more seeds can measure.
 - **Further reading.** Henderson et al., Deep Reinforcement Learning that Matters (AAAI 2018)
+
+## Level 4 · The Bag of Winds
+
+### Training and test conditions
+
+*An agent learns the world it trains in; tested in a different one, it may fail.*
+
+- **Story.** A raft that only ever practised in calm water has never met a gust.
+- **Intuition.** Trained without wind, the raft learns that the short way is safe, and it is, in calm water. Tested in the real wind, it is lost half the time. Train in the conditions you will be tested in, or in a range that covers them.
+- **Math.** Q-learning estimates values under the training dynamics P_train(s′ | s, a). If the test dynamics P_test differ, those values, and the greedy policy built on them, can be wrong. Level 10 returns to this as distribution shift.
+- **Further reading.** Tobin et al., Domain Randomization for Transferring Deep Neural Networks from Simulation to the Real World (IROS 2017)
+
+### Stochastic transitions
+
+*The same action in the same state can lead to different next states, each with its own probability.*
+
+- **Story.** Ask the sea the same question twice and it may answer differently.
+- **Intuition.** In windy water a move east usually goes east, but sometimes a gust turns it north or south. Trying one move many times from one cell shows the spread of outcomes. The randomness comes from the episode's seed, so every voyage still replays exactly.
+- **Math.** The dynamics are a distribution P(s′ | s, a). In a windy cell with slip p: 1 − p to the intended cell and p/2 to each side. The process is still Markov: the distribution depends only on s and a.
+- **Further reading.** Sutton & Barto (2018), §3.1
+
+### Expected return
+
+*The return averaged over everything that might happen: what an agent should maximise when outcomes are uncertain.*
+
+- **Story.** A wise captain asks which way is best on average, not which is shortest.
+- **Intuition.** With gusts, a route does not have one return but a spread of them. The short way is worth +4 when it works and much less when a gust drops the raft in a whirlpool. Averaged, the longer safe way is worth more. Q-values estimate exactly these averages.
+- **Math.** Q(s, a) = E[r + γ max_a′ Q(s′, a′)] = Σ_s′ P(s′ | s, a) [r + γ max_a′ Q(s′, a′)]. Q-learning's updates are samples of this expectation, and with a small enough α they converge to it.
+- **Further reading.** Sutton & Barto (2018), §3.5–3.6 and §6.5
+
+### Markov decision process
+
+*States, actions, transition probabilities and rewards: the model behind every level so far.*
+
+- **Story.** Every sea Odysseus has crossed follows the same four rules.
+- **Intuition.** A Markov decision process has states, actions, a probability for each next state given a state and an action, and a reward. Calypso's loom was one with certainty; the windy sea is one with chance. The agent's goal is the policy with the highest expected return.
+- **Math.** An MDP is (S, A, P, R, γ) with P(s′ | s, a) and R(s, a, s′). An optimal policy π* maximises E[Σ_t γ^t r_{t+1}] from every state; Q* satisfies the Bellman optimality equation.
+- **Further reading.** Sutton & Barto (2018), ch. 3; Puterman, Markov Decision Processes (1994)

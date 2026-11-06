@@ -233,6 +233,14 @@ pub fn shortest_route_return(world: &GridWorld) -> Option<f32> {
     plain.then(|| g.best_return(0).map(|(r, _)| r)).flatten()
 }
 
+/// The world tests sail in: `world` with the level's own wind restored, so
+/// an agent trained in calmer water is still tested in the real sea.
+pub fn test_world(world: &GridWorld) -> GridWorld {
+    let mut w = world.clone();
+    w.set_slip(w.grid().level_slip);
+    w
+}
+
 /// Whether a test episode counts as a success.
 pub fn succeeded(def: SuccessDef, e: &PlayedEpisode, best_return: Option<f32>) -> bool {
     match def {
@@ -247,8 +255,11 @@ pub fn succeeded(def: SuccessDef, e: &PlayedEpisode, best_return: Option<f32>) -
 }
 
 impl EvaluationReport {
-    /// Sails the greedy policy of `learner` on every test seed. Deterministic.
-    pub fn run(world: &mut GridWorld, learner: &QLearner, evaluation: Evaluation) -> Self {
+    /// Sails the greedy policy of `learner` on every test seed, in the level's
+    /// own wind whatever the agent trained in. Deterministic.
+    pub fn run(world: &GridWorld, learner: &QLearner, evaluation: Evaluation) -> Self {
+        let mut world = test_world(world);
+        let world = &mut world;
         let best = shortest_route_return(world);
         let episodes: Vec<RecordedEpisode> = (0..u64::from(evaluation.episodes))
             .map(|k| play_recorded(world, &mut GreedyPolicy(&learner.table), evaluation.first_seed.wrapping_add(k)))
@@ -372,7 +383,7 @@ impl PreparedExperiment {
     pub fn run(&mut self) -> ExperimentRun {
         let left = self.config.episodes.saturating_sub(self.trainer.episodes_trained());
         self.trainer.train(&mut self.world, left);
-        let evaluation = EvaluationReport::run(&mut self.world, &self.trainer.learner, self.config.evaluation);
+        let evaluation = EvaluationReport::run(&self.world, &self.trainer.learner, self.config.evaluation);
         ExperimentRun {
             config: self.config.clone(),
             engine: engine_version(),
@@ -468,7 +479,7 @@ mod tests {
 
     #[test]
     fn reward_edits_must_stay_in_range() {
-        let edits = |w: f32| PlayerEdits { rewards: vec![("lure".into(), w)], observation: None };
+        let edits = |w: f32| PlayerEdits { rewards: vec![("lure".into(), w)], ..Default::default() };
         let lotus = |w| {
             ExperimentConfig::q_learning("l02_the_lotus_eaters", LOTUS, edits(w), QLearningConfig::default(), 1, 10)
                 .unwrap()

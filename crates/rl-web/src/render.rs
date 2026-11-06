@@ -234,6 +234,10 @@ pub fn draw_world(ctx: &Ctx, model: &RenderModel, state: &mut RenderState, now: 
         let (px, py) = to_px(f64::from(x), f64::from(y));
         draw_wall(ctx, px, py, cell, fx);
     }
+    for &(x, y) in &model.wind {
+        let (px, py) = to_px(f64::from(x), f64::from(y));
+        draw_wind(ctx, px, py, cell, now, fx);
+    }
     for &(x, y) in &model.hazards {
         let (px, py) = to_px(f64::from(x), f64::from(y));
         draw_hazard(ctx, px, py, cell, false, fx);
@@ -343,6 +347,25 @@ fn draw_policy_overlay(
 }
 
 // ---------------------------------------------------------------- glyphs
+
+/// Wind: faint streamlines drifting across the cell, in terrain green. Shape
+/// alone tells it apart; it sits under everything else.
+pub fn draw_wind(ctx: &Ctx, x: f64, y: f64, cell: f64, now: f64, fx: Effects) {
+    set_glow(ctx, theme::TERRAIN.hex, 3.0, fx);
+    ctx.set_line_width(1.2);
+    ctx.set_stroke_style_str(&theme::rgba(theme::TERRAIN.hex, 0.38));
+    let drift = (now / 1100.0 + x * 0.013).sin() * cell * 0.06;
+    for k in 0..3 {
+        let yy = y + cell * (0.3 + 0.2 * f64::from(k));
+        let x0 = x + cell * 0.18 + drift * if k == 1 { -1.0 } else { 1.0 };
+        let w = cell * 0.64;
+        ctx.begin_path();
+        ctx.move_to(x0, yy);
+        ctx.bezier_curve_to(x0 + w * 0.25, yy - cell * 0.06, x0 + w * 0.5, yy + cell * 0.06, x0 + w * 0.75, yy);
+        ctx.line_to(x0 + w, yy - cell * 0.03);
+        ctx.stroke();
+    }
+}
 
 /// Lure: a lotus flower outline in gold. Tempting like the goal, told apart by shape.
 pub fn draw_lotus(ctx: &Ctx, cx: f64, cy: f64, cell: f64, now: f64, fx: Effects) {
@@ -633,7 +656,7 @@ pub fn draw_style_sheet(ctx: &Ctx, now: f64, fx: Effects) {
         (col * tile_w + tile_w / 2.0, row * tile_h + tile_h / 2.0 - 18.0)
     };
 
-    let items: [(&str, &str); 17] = [
+    let items: [(&str, &str); 18] = [
         ("agent", theme::AGENT.name),
         ("adversary", theme::ADVERSARY.name),
         ("goal", theme::GOAL.name),
@@ -651,6 +674,7 @@ pub fn draw_style_sheet(ctx: &Ctx, now: f64, fx: Effects) {
         ("teammate", theme::AGENT.name),
         ("bump", theme::TERRAIN.name),
         ("lure (lotus)", theme::GOAL.name),
+        ("wind", "terrain 38%"),
     ];
     for (i, (text, token)) in items.iter().enumerate() {
         let (cx, cy) = centre(i);
@@ -691,7 +715,8 @@ pub fn draw_style_sheet(ctx: &Ctx, now: f64, fx: Effects) {
                 ctx.set_global_alpha(1.0);
             }
             15 => draw_spark(ctx, cx, cy, cell, t, fx),
-            _ => draw_lotus(ctx, cx, cy, cell, now, fx),
+            16 => draw_lotus(ctx, cx, cy, cell, now, fx),
+            _ => draw_wind(ctx, x0, y0, cell, now, fx),
         }
         label(i, text, token);
     }

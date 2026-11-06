@@ -58,8 +58,13 @@ window at least about 1200 × 800.
    - COMPARE: both runs are in the log; tick them, read the chart and the table, WATCH a test voyage, RERUN one
      (it must say "reproduced exactly").
    - CONFIGURE: ticking features in the Observation Builder changes the Q-table size; APPLY, train and DEPLOY.
-6. **LIBRARY** (top right): concepts open as tutorials reach them; REPLAY THE EXPLAINER returns to the step.
-7. **Plain mode** (top right): the scanlines and glow go away and everything stays readable.
+6. **Level 4**:
+   - The calm-water guided experiment arrives in only about half the test voyages; WATCH shows gusts and whirlpools.
+   - Click a windy cell beside the whirlpools, then TRY EACH MOVE 100×: about 80/10/10.
+   - The windy experiment arrives every time by the north shore. Both runs are in COMPARE.
+   - CONFIGURE: the training wind setting; APPLY, train and DEPLOY in the real wind.
+7. **LIBRARY** (top right): concepts open as tutorials reach them; REPLAY THE EXPLAINER returns to the step.
+8. **Plain mode** (top right): the scanlines and glow go away and everything stays readable.
 
 Shortcuts for testers:
 

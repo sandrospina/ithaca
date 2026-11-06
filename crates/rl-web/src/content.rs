@@ -33,6 +33,12 @@ pub const LEVELS: &[LevelEntry] = &[
         level_source: include_str!("../../../content/levels/l03_cyclops_cave.ron"),
         tutorial_source: include_str!("../../../content/tutorials/l03_cyclops_cave.ron"),
     },
+    LevelEntry {
+        id: "l04_bag_of_winds",
+        menu_label: "4 · The Bag of Winds",
+        level_source: include_str!("../../../content/levels/l04_bag_of_winds.ron"),
+        tutorial_source: include_str!("../../../content/tutorials/l04_bag_of_winds.ron"),
+    },
 ];
 
 /// The concept library (`content/concepts.ron`).
@@ -86,6 +92,8 @@ mod tests {
                         U::BestSeed | U::Quiz => agent && has_batch,
                         U::Rewards => def.player_editable.reward.is_some(),
                         U::Observation => def.player_editable.observation.is_some(),
+                        U::Wind => def.player_editable.wind.is_some(),
+                        U::Outcomes => agent && def.wind.is_some(),
                         U::Objective => def.challenge.is_some(),
                         _ => true,
                     };

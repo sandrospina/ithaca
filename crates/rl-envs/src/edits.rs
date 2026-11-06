@@ -20,6 +20,10 @@ pub struct PlayerEdits {
     /// The agent's observation features, replacing the level's default.
     #[serde(default)]
     pub observation: Option<Vec<FeatureDef>>,
+    /// The training wind's slip, replacing the level's. Tests ignore it and
+    /// always sail the level's own wind.
+    #[serde(default)]
+    pub wind: Option<f32>,
 }
 
 /// How out-of-bounds values are treated.
@@ -79,6 +83,20 @@ impl GridWorld {
             },
         };
 
+        let mut slip = None;
+        if let Some(w) = edits.wind {
+            let level = self.grid().level_slip;
+            match allowed.wind {
+                // Restating the level's own wind is not a change.
+                _ if w == level => slip = Some(w),
+                Some((lo, hi)) if w.is_finite() && (mode == EditMode::Clamp || (lo..=hi).contains(&w)) => {
+                    slip = Some(w.clamp(lo, hi));
+                }
+                Some((lo, hi)) => errors.push(LevelError::new("edits.wind", format!("{w} is outside {lo} to {hi}"))),
+                None => errors.push(LevelError::new("edits.wind", "the wind is fixed in this level")),
+            }
+        }
+
         if !errors.is_empty() && mode == EditMode::Strict {
             return Err(errors);
         }
@@ -87,6 +105,9 @@ impl GridWorld {
         }
         if let Some(features) = observation {
             self.set_observation(features);
+        }
+        if let Some(slip) = slip {
+            self.set_slip(slip);
         }
         if errors.is_empty() { Ok(()) } else { Err(errors) }
     }

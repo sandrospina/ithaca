@@ -30,6 +30,9 @@ pub enum SimRequest {
         rewards: Vec<(String, f32)>,
         #[serde(default)]
         observation: Option<Vec<FeatureDef>>,
+        /// The training wind's slip, on levels where the player sets it.
+        #[serde(default)]
+        wind: Option<f32>,
         training_seed: u64,
     },
     /// Trains the current agent for up to `episodes` more episodes, within the budget.
@@ -49,6 +52,9 @@ pub enum SimRequest {
     /// world with the edits it was recorded with. AgentStep then takes the next
     /// recorded action.
     Replay { seed: u64, actions: Vec<u32>, edits: PlayerEdits },
+    /// Tries every move `trials` times from `cell` in the current sea, and
+    /// reports where the raft ends up.
+    Outcomes { cell: (i32, i32), trials: u32 },
     /// Asks for the current raft in a form that can be saved.
     Export,
     /// Replaces the current raft with a saved one, if it was trained on this
@@ -115,6 +121,9 @@ pub struct SavedRaft {
     /// before spec hashes were recorded have none.
     #[serde(default)]
     pub spec_hash: Option<SpecHash>,
+    /// The wind it trained in; `None` means the level's.
+    #[serde(default)]
+    pub wind: Option<f32>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -132,6 +141,7 @@ pub enum SimResponse {
         snapshot: Box<Snapshot>,
     },
     Export(Box<SavedRaft>),
+    Outcomes(Box<OutcomeReport>),
     Error(String),
 }
 
@@ -281,6 +291,43 @@ pub struct TrainingStatus {
     pub policy: Vec<CellPolicy>,
     /// The agent's observation, on levels where the player chooses it.
     pub observation: Option<ObservationStatus>,
+    /// The training wind, on levels where the player sets it.
+    pub wind: Option<WindStatus>,
+}
+
+/// The wind the raft trains in, and the level's own.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct WindStatus {
+    pub slip: f32,
+    pub range: (f32, f32),
+    /// The level's own slip: what every test sails in.
+    pub level: f32,
+}
+
+/// Where one move from one cell takes the raft, over many tries.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct OutcomeReport {
+    pub cell: (i32, i32),
+    pub trials: u32,
+    pub slip: f32,
+    /// Per move, in north, east, south, west order.
+    pub moves: Vec<MoveOutcomes>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct MoveOutcomes {
+    pub action: String,
+    /// Each cell the raft ended in, how often, and whether that ended the voyage there.
+    pub landings: Vec<Landing>,
+    pub mean_reward: f32,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Landing {
+    pub cell: (i32, i32),
+    pub count: u32,
+    /// What the cell did: "", "whirlpool", "goal" and so on.
+    pub note: String,
 }
 
 impl ObservationStatus {

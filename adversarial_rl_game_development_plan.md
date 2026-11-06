@@ -369,6 +369,15 @@ Visualise repeated outcomes from the same state and action.
 
 The player compares deterministic and stochastic training and sees why a policy must account for expected outcomes, for example the safe path beating the short one.
 
+Status (2026-11-05): built. Windy cells turn a move 90° aside with the level's slip (20%: 80/10/10), drawn from the
+episode seed so replays stay exact. Tests always sail the level's own wind; the player may train in calmer or
+rougher water (0–40%). A raft trained in calm water takes the short way past the whirlpools and arrives in at most 7
+of 10 test voyages; trained in the real wind it takes the calm detour and arrives in all 10
+(`crates/rl-training/tests/bag_of_winds.rs`). The move tester tries each move 100 times from a cell. The level's
+comparison task (`CompareWind`) completes from the experiment log. The stochastic Cyclops is in the engine
+(`chase_shortest_path(p_random)`, tested) but not on this map: with him the raft would need his position too, a
+49× larger table, which would bury the expected-return lesson.
+
 ------------------------------------------------------------------------
 
 ## Milestone 6 — Level 5: The House of Hades

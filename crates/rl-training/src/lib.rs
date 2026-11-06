@@ -13,7 +13,7 @@ pub use episode::{
 };
 pub use experiment::{
     Algorithm, EXPERIMENT_SCHEMA, Evaluation, EvaluationReport, ExperimentConfig, ExperimentRun, LevelRef,
-    PreparedExperiment, QLearningBounds, run_experiment, shortest_route_return, succeeded, tabular_states,
+    PreparedExperiment, QLearningBounds, run_experiment, shortest_route_return, succeeded, tabular_states, test_world,
 };
 pub use runner::{EpisodeRecord, EvalSummary, evaluate, replay, run_episode};
 pub use stats::{BatchEpisode, BatchReport, Summary, moving_mean, running_mean};

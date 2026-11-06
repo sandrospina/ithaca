@@ -30,6 +30,12 @@ pub struct CompiledGrid {
     pub lethal: Vec<bool>,
     /// Row-major: cells that pay the lure term each step.
     pub lures: Vec<bool>,
+    /// Row-major: windy cells, where a move may be turned aside.
+    pub winds: Vec<bool>,
+    /// Chance a move from a windy cell is turned aside, now.
+    pub slip: f32,
+    /// The level's own slip: what tests always sail in.
+    pub level_slip: f32,
     /// Editor label per reward term, from the level or the catalogue.
     pub reward_labels: [String; RewardTerm::COUNT],
     /// Reward terms present in the level file, in file order.
@@ -104,6 +110,7 @@ impl CompiledGrid {
         let mut hazards = vec![false; cells];
         let mut lethal = vec![false; cells];
         let mut lures = vec![false; cells];
+        let mut winds = vec![false; cells];
         let mut spawns = vec![Vec::new(); def.agents.len()];
         for (y, row) in def.map.iter().enumerate() {
             for (x, c) in row.chars().enumerate() {
@@ -114,6 +121,7 @@ impl CompiledGrid {
                     CellMeaning::Hazard { lethal: true } => lethal[i] = true,
                     CellMeaning::Hazard { lethal: false } => hazards[i] = true,
                     CellMeaning::Lure => lures[i] = true,
+                    CellMeaning::Wind => winds[i] = true,
                     CellMeaning::Spawn(agent) => {
                         let id = def.agents.get_index_of(agent).expect("validated");
                         spawns[id].push((x as i32, y as i32));
@@ -138,8 +146,13 @@ impl CompiledGrid {
             .enumerate()
             .filter_map(|(agent, a)| match &a.controller {
                 ControllerDef::Learner => None,
-                ControllerDef::Scripted { behaviour: BehaviourDef::ChaseShortestPath { every_n_steps } } => {
-                    Some(ScriptedAgent { agent, every_n_steps: *every_n_steps, chase: chase.clone() })
+                ControllerDef::Scripted { behaviour: BehaviourDef::ChaseShortestPath { every_n_steps, p_random } } => {
+                    Some(ScriptedAgent {
+                        agent,
+                        every_n_steps: *every_n_steps,
+                        p_random: *p_random,
+                        chase: chase.clone(),
+                    })
                 }
             })
             .collect();
@@ -155,6 +168,9 @@ impl CompiledGrid {
             hazards,
             lethal,
             lures,
+            winds,
+            slip: def.wind.map_or(0.0, |w| w.slip),
+            level_slip: def.wind.map_or(0.0, |w| w.slip),
             reward_labels: RewardTerm::ALL
                 .map(|t| def.reward_labels.get(t.name()).cloned().unwrap_or_else(|| t.description().to_string())),
             reward_terms: def.reward.keys().filter_map(|n| RewardTerm::from_name(n)).collect(),
@@ -253,6 +269,8 @@ pub struct ScriptedAgent {
     /// Index among all agents.
     pub agent: usize,
     pub every_n_steps: u32,
+    /// Chance each move goes in a random direction instead.
+    pub p_random: f32,
     /// Shared between copies of the world: it never changes after compiling.
     pub chase: Arc<ChaseShortestPath>,
 }

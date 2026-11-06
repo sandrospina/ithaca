@@ -22,6 +22,8 @@ pub struct Draft {
     pub rewards: Vec<(String, f32)>,
     /// The observation features, on levels where the player chooses them.
     pub observation: Option<Vec<FeatureDef>>,
+    /// The training wind's slip, on levels where the player sets it.
+    pub wind: Option<f32>,
     pub training_seed: u64,
 }
 
@@ -31,6 +33,7 @@ impl Draft {
             config: t.config,
             rewards: t.rewards.iter().map(|r| (r.term.clone(), r.weight)).collect(),
             observation: t.observation.as_ref().map(|o| o.features.clone()),
+            wind: t.wind.map(|w| w.slip),
             training_seed: t.training_seed,
         }
     }
@@ -48,6 +51,7 @@ impl Draft {
         let edits = PlayerEdits {
             rewards: self.rewards.iter().filter(|(t, _)| editable(t)).cloned().collect(),
             observation: self.observation.clone(),
+            wind: self.wind,
         };
         ExperimentConfig::q_learning(level_id, source, edits, self.config, self.training_seed, episodes)
             .map_err(|e| crate::sim::errors_text(&e))
@@ -147,6 +151,29 @@ pub fn configure_view(ctx: TrainCtx) -> impl IntoView {
                     }}
                 </p>
                 {status.observation.clone().map(|o| observation_builder(ctx, o))}
+                {status.wind.map(|w| {
+                    view! {
+                        <div class="wind-setting" class:hl-box=move || ctx.hl(UiElement::Wind)>
+                            <h3>"TRAINING WIND"</h3>
+                            <div class="setting">
+                                <span class="setting-name">"slip in windy water"</span>
+                                {number_input(
+                                    move || ctx.draft.with(|d| d.as_ref().and_then(|d| d.wind).unwrap_or(w.slip)),
+                                    move |v| ctx.draft.update(|d| if let Some(d) = d { d.wind = Some(v) }),
+                                    w.range,
+                                    "0.05",
+                                )}
+                                <span class="setting-range">{format!("{} to {}", w.range.0, w.range.1)}</span>
+                                <span class="setting-about">
+                                    {format!(
+                                        "the chance a move in windy water is turned aside while training; tests always sail the real wind, {:.0}%",
+                                        w.level * 100.0
+                                    )}
+                                </span>
+                            </div>
+                        </div>
+                    }
+                })}
                 <h3>"LEARNING"</h3>
                 {setting("learning rate", "α", "how far each update moves a value toward its target", |c| c.alpha, |c, v| c.alpha = v, b.alpha)}
                 {setting("discount", "γ", "how much later rewards count compared with immediate ones", |c| c.gamma, |c, v| c.gamma = v, b.gamma)}

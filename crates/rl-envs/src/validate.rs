@@ -56,6 +56,7 @@ pub(crate) fn resolve_char<'a>(def: &'a LevelDef, c: char) -> Option<CellMeaning
         Some(LegendEntry::Open) => Some(CellMeaning::Open),
         Some(LegendEntry::Hazard { lethal }) => Some(CellMeaning::Hazard { lethal: *lethal }),
         Some(LegendEntry::Lure) => Some(CellMeaning::Lure),
+        Some(LegendEntry::Wind) => Some(CellMeaning::Wind),
         None => match c {
             '#' => Some(CellMeaning::Wall),
             '.' => Some(CellMeaning::Open),
@@ -71,6 +72,7 @@ pub(crate) enum CellMeaning<'a> {
     Goal(&'a str),
     Hazard { lethal: bool },
     Lure,
+    Wind,
 }
 
 /// Problems with a success-rate goal's numbers.
@@ -109,6 +111,7 @@ pub fn validate(def: &LevelDef) -> Result<(), LevelErrors> {
     let mut goal_count = 0;
     let mut lethal_count = 0;
     let mut special_count = 0;
+    let mut wind_count = 0;
     for (y, row) in def.map.iter().enumerate() {
         let len = row.chars().count();
         if len != width as usize {
@@ -124,6 +127,7 @@ pub fn validate(def: &LevelDef) -> Result<(), LevelErrors> {
                 Some(CellMeaning::Goal(_)) => goal_count += 1,
                 Some(CellMeaning::Hazard { lethal: true }) => lethal_count += 1,
                 Some(CellMeaning::Hazard { lethal: false } | CellMeaning::Lure) => special_count += 1,
+                Some(CellMeaning::Wind) => wind_count += 1,
                 Some(CellMeaning::Wall | CellMeaning::Open) => {}
             }
         }
@@ -151,7 +155,7 @@ pub fn validate(def: &LevelDef) -> Result<(), LevelErrors> {
     }
     let scripted: Vec<&str> = def.agents.keys().skip(learners).map(String::as_str).collect();
     for (name, agent) in def.agents.iter().skip(learners) {
-        let ControllerDef::Scripted { behaviour: BehaviourDef::ChaseShortestPath { every_n_steps } } =
+        let ControllerDef::Scripted { behaviour: BehaviourDef::ChaseShortestPath { every_n_steps, p_random } } =
             &agent.controller
         else {
             continue;
@@ -159,8 +163,25 @@ pub fn validate(def: &LevelDef) -> Result<(), LevelErrors> {
         if *every_n_steps == 0 {
             err("agents", format!("\"{name}\": every_n_steps must be at least 1"));
         }
+        if !(0.0..=1.0).contains(p_random) {
+            err("agents", format!("\"{name}\": p_random must be in 0..=1"));
+        }
         if width * height > MAX_CHASE_CELLS {
             err("agents", format!("\"{name}\": chase_shortest_path needs a grid of at most {MAX_CHASE_CELLS} cells"));
+        }
+    }
+    match def.wind {
+        Some(w) if !(0.0..=1.0).contains(&w.slip) => err("wind", "slip must be in 0..=1".into()),
+        None if wind_count > 0 => err("wind", "windy cells need a `wind` strength".into()),
+        _ => {}
+    }
+    if let Some((lo, hi)) = def.player_editable.wind {
+        let default = def.wind.map_or(0.0, |w| w.slip);
+        if !(0.0..=1.0).contains(&lo) || !(0.0..=1.0).contains(&hi) || lo > hi || !(lo..=hi).contains(&default) {
+            err("player_editable.wind", "the range must satisfy 0 ≤ min ≤ level slip ≤ max ≤ 1".into());
+        }
+        if wind_count == 0 {
+            err("player_editable.wind", "the map has no windy cells".into());
         }
     }
     if def.termination.contains(&TerminationDef::CaughtByOpponent) && scripted.is_empty() {
@@ -292,6 +313,14 @@ pub fn validate(def: &LevelDef) -> Result<(), LevelErrors> {
                                     "challenge",
                                     format!("task {i}: comparing observations needs an editable observation"),
                                 );
+                            }
+                        }
+                        TaskDef::CompareWind { min_gain } => {
+                            if *min_gain == 0 {
+                                err("challenge", format!("task {i}: min_gain must be at least 1"));
+                            }
+                            if def.player_editable.wind.is_none() {
+                                err("challenge", format!("task {i}: comparing winds needs an editable wind"));
                             }
                         }
                         TaskDef::TrainAgent { threshold, eval_episodes, .. } => {

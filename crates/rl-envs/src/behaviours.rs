@@ -8,12 +8,17 @@ use serde::{Deserialize, Serialize};
 use crate::grid::Direction;
 
 /// Behaviours a level file may give a scripted agent.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BehaviourDef {
     /// Moves one cell along a shortest path toward the nearest learner,
-    /// once every `every_n_steps` steps.
-    ChaseShortestPath { every_n_steps: u32 },
+    /// once every `every_n_steps` steps. With probability `p_random` a move
+    /// goes in a random direction instead.
+    ChaseShortestPath {
+        every_n_steps: u32,
+        #[serde(default)]
+        p_random: f32,
+    },
 }
 
 /// `chase_shortest_path`, compiled for one map: for every (from, target)

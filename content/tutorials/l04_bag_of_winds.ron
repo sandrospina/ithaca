@@ -1,0 +1,109 @@
+// Tutorial for Level 4 — The Bag of Winds. Stochastic transitions and expected return.
+// The guided experiments differ only in the training wind, so together they
+// also settle the level's comparison task. Their outcomes are pinned by
+// crates/rl-training/tests/bag_of_winds.rs and by the guided-experiment test.
+Tutorial(
+  schema: 1,
+  id: "l04_bag_of_winds",
+  level: "l04_bag_of_winds",
+  steps: [
+    Say(
+      beat: Briefing,
+      title: "The Bag of Winds",
+      text: (
+        story: "Aeolus, keeper of the winds, tied the storms into a leather bag. The crew opened it within sight of home. Now gusts roam this water.",
+        intuition: "The short way to the harbour runs through windy water, right beside a row of whirlpools. The north shore is calm but longer. In a windy cell a gust may turn a move aside: 80% of moves go where you steer, 10% veer left, 10% veer right.",
+      ),
+      highlight: [Objective, Arena],
+    ),
+    Experiment(
+      beat: OldWayFails,
+      title: "Practice in calm water",
+      text: (
+        story: "Every sea so far did exactly what you asked. Train the raft the way you always have.",
+        intuition: "This raft trains in calm water: the gusts are switched off for training. Then it is tested, as every raft here is, in the real wind. Run it, then WATCH TRAINED RAFT on a few seeds.",
+        math: "Training uses slip 0, so every move is deterministic. The test uses slip 0.2. The raft has never seen a gust.",
+      ),
+      highlight: [Arena, Autopilot],
+      experiment: (
+        wind: 0.0,
+        training_seed: 1,
+        episodes: 800,
+        expect: [(measure: ReachGoal, at_most: 0.7)],
+      ),
+    ),
+    Say(
+      beat: Explainer,
+      title: "One move, many outcomes",
+      text: (
+        story: "Ask the sea the same question twice and it may answer differently.",
+        intuition: "Click a windy cell beside the whirlpools, then press TRY EACH MOVE 100× in the Q-values panel. The same state and the same move end in different places. Moving east along the whirlpools ends in a whirlpool about one time in ten.",
+        math: "Transitions are now a probability distribution P(s′ | s, a). For a move east from a windy cell: 0.8 to the east cell, 0.1 to the north cell, 0.1 to the south cell.",
+      ),
+      highlight: [Outcomes, QValues],
+    ),
+    Predict(
+      beat: Predict,
+      title: "Train in the wind",
+      text: (
+        story: "Let the raft feel the gusts while it learns.",
+        intuition: "Now the same raft, same settings, same seed, trains in the real 20% wind. Predict, then run it.",
+        math: "Training and test now use the same transition probabilities P(s′ | s, a).",
+      ),
+      highlight: [Wind],
+      question: "Trained in the real wind, which way will the raft go?",
+      options: [
+        "The short way, more carefully: it still arrives about half the time.",
+        "The long way round by the north shore, arriving almost every time.",
+        "Nowhere useful: random gusts make it impossible to learn.",
+      ],
+      answer: 1,
+      explain: "Q-learning averages over what each move actually led to. Along the whirlpools that average includes the deaths, so the calm detour is worth more.",
+      experiment: (
+        wind: 0.2,
+        training_seed: 1,
+        episodes: 800,
+        expect: [(measure: ReachGoal, at_least: 0.9)],
+      ),
+    ),
+    Say(
+      beat: Explainer,
+      title: "Expected return",
+      text: (
+        story: "A wise captain does not ask which way is shortest, but which way is best on average.",
+        intuition: "The short way takes 6 moves, a return of +4, but only about half the rafts survive the six gusty moves beside the whirlpools. The detour takes about 10 moves, a return of about 0, and nearly always arrives. On average the detour is worth more, and that average is what Q-values estimate.",
+        math: "Q(s, a) = Σ_s′ P(s′ | s, a) [r + γ max_a′ Q(s′, a′)]. Six windy moves survive with probability 0.9⁶ ≈ 0.53, so the short way is worth about 0.53 · 4 + 0.47 · (−10 − 3) ≈ −4, against about 0 for the detour.",
+      ),
+      highlight: [QValues],
+    ),
+    Say(
+      beat: GuidedExperiment,
+      title: "Prove it in COMPARE",
+      text: (
+        story: "Calypso trusts experiments, not stories.",
+        intuition: "Open COMPARE. Your two guided runs differ only in the wind they trained in, and both were tested in the real wind. Compare their test voyages and their average moves, then WATCH a calm-water raft meet a gust.",
+        math: "One change, everything else fixed: the difference in arrivals is caused by the training wind.",
+      ),
+      highlight: [Compare],
+    ),
+    Say(
+      beat: Challenge,
+      title: "Into the harbour",
+      text: (
+        story: "Now take your own crew home through the wind.",
+        intuition: "Choose the training wind and the learning settings in CONFIGURE, apply, train within the budget and deploy: the raft must reach the harbour in 9 of 10 test voyages through the real wind.",
+      ),
+      highlight: [Configure, Deploy, Objective],
+    ),
+    Say(
+      beat: Debrief,
+      title: "What the winds teach",
+      text: (
+        story: "The sea did not cheat. It was only uncertain, and the raft learned to respect that.",
+        intuition: "When actions have uncertain outcomes, the best action is the one with the best average result, not the best possible one. Train in the conditions you will be tested in. Next, the House of Hades: darkness, where the raft cannot see where it is.",
+        math: "With stochastic transitions the problem is still a Markov decision process. Q-learning's sampled updates converge to expected values, so the greedy policy maximises expected return.",
+      ),
+      highlight: [Arena],
+    ),
+  ],
+)

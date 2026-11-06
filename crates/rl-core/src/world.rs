@@ -29,6 +29,13 @@ pub enum StepEvent {
         agent: AgentId,
         at: (i32, i32),
     },
+    /// A gust turned the agent's move: it asked for `intended` and went `actual`
+    /// (action indices).
+    Gust {
+        agent: AgentId,
+        intended: u32,
+        actual: u32,
+    },
     /// Another agent caught this one; its episode ends.
     Caught {
         agent: AgentId,

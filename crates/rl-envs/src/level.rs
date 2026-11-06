@@ -33,6 +33,9 @@ pub struct LevelDef {
     #[serde(default)]
     pub reward_labels: IndexMap<String, String>,
     pub observation: Vec<FeatureDef>,
+    /// How strong the wind is in `Wind` cells. Required if the map has any.
+    #[serde(default)]
+    pub wind: Option<WindDef>,
     pub termination: Vec<TerminationDef>,
     pub truncation: TruncationDef,
     #[serde(default)]
@@ -89,8 +92,19 @@ pub enum LegendEntry {
     },
     /// A cell that pays the `lure` term each step the agent stays on it.
     Lure,
+    /// A windy cell: a move made from it may be turned aside (see `LevelDef::wind`).
+    Wind,
     Wall,
     Open,
+}
+
+/// Transition noise in windy cells.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WindDef {
+    /// Chance that a move from a windy cell is turned 90° aside, split evenly
+    /// between left and right. 0.2 means 80% as steered, 10% each side.
+    pub slip: f32,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -177,6 +191,10 @@ pub struct PlayerEditable {
     pub reward: Option<RewardEdit>,
     #[serde(default)]
     pub hyperparameters: Option<HyperparameterBounds>,
+    /// The range the player may set the training wind's slip in. Tests always
+    /// sail the level's own wind.
+    #[serde(default)]
+    pub wind: Option<(f32, f32)>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -237,6 +255,10 @@ pub enum TaskDef {
     /// observes `agent` (its position or its direction), where the run that
     /// observes it reaches the goal in at least `min_gain` more test episodes.
     CompareObservations { agent: String, min_gain: u32 },
+    /// Run two experiments in COMPARE that differ only in the training wind,
+    /// where the run trained in the stronger wind reaches the goal in at least
+    /// `min_gain` more test episodes (tests always sail the level's wind).
+    CompareWind { min_gain: u32 },
     /// Train an agent that succeeds in `threshold` of `eval_episodes` test episodes.
     TrainAgent {
         threshold: f32,

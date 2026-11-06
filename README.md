@@ -53,8 +53,13 @@ Milestones 0–2 and Level 3 are in place:
   Observation Builder in CONFIGURE chooses what the raft sees and shows the Q-table's size. A raft that sees only
   itself cannot pass; the player proves by experiment what it must see (`crates/rl-training/tests/cyclops_cave.rs`).
 
-Next: playtest Levels 0–3 (the first playable prototype), then Level 4, The Bag of Winds. The Burn spike still needs
-the three servers.
+- Level 4, The Bag of Winds: gusts in windy water turn moves aside (80/10/10). The short way passes a row of
+  whirlpools; the calm detour is longer. Tests always sail the real wind; the player sets the training wind in
+  CONFIGURE, and TRY EACH MOVE 100× in the Q-values panel shows one move's spread of outcomes. A raft trained in calm
+  water is lost half the time; one trained in the wind takes the detour (`crates/rl-training/tests/bag_of_winds.rs`).
+
+Next: playtest Levels 0–4, then Level 5, The House of Hades (partial observability). The Burn spike still needs the
+three servers.
 
 ## Layout
 

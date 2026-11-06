@@ -207,6 +207,12 @@ impl Progress {
                             "two COMPARE runs that differ only in what the raft sees; {min_gain}+ more escapes"
                         )),
                     ),
+                    TaskDef::CompareWind { min_gain } => (
+                        "show by experiment that training in the wind pays".into(),
+                        Some(format!(
+                            "two COMPARE runs that differ only in the training wind; {min_gain}+ more arrivals"
+                        )),
+                    ),
                     TaskDef::TrainAgent { threshold, eval_episodes, success, label, .. } => {
                         let wins = (threshold * *eval_episodes as f32).ceil() as u32;
                         let what = match success {
@@ -323,13 +329,24 @@ impl Progress {
 
     /// Records the level's experiment log: a comparison task is done when the
     /// log holds a pair of runs that settles it. Returns true if this completed the level.
-    pub fn record_experiments(&mut self, goal: &GoalDef, log: &ExperimentLog, default: &[FeatureDef]) -> bool {
+    pub fn record_experiments(
+        &mut self,
+        goal: &GoalDef,
+        log: &ExperimentLog,
+        default: &[FeatureDef],
+        level_slip: f32,
+    ) -> bool {
         let GoalDef::Tasks(tasks) = goal else {
             return false;
         };
         for (i, task) in tasks.iter().enumerate() {
             if let TaskDef::CompareObservations { agent, min_gain } = task
                 && log.observation_gain(agent, default).is_some_and(|g| g >= i64::from(*min_gain))
+            {
+                self.mark(&log.level_id, task_key(i));
+            }
+            if let TaskDef::CompareWind { min_gain } = task
+                && log.wind_gain(level_slip).is_some_and(|g| g >= i64::from(*min_gain))
             {
                 self.mark(&log.level_id, task_key(i));
             }

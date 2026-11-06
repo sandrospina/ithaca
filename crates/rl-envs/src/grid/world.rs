@@ -103,6 +103,19 @@ impl GridWorld {
         self.agents[..self.grid.learners].iter().all(|a| a.terminated || a.truncated)
     }
 
+    /// Sets the wind's slip for this world, e.g. a calmer training sea.
+    /// Callers check the level's editing rules.
+    pub fn set_slip(&mut self, slip: f32) {
+        self.grid.slip = slip;
+    }
+
+    /// Puts learner `agent` on `cell` after a reset, e.g. to try one move from
+    /// there many times. The cell must be open.
+    pub fn place(&mut self, agent: AgentId, cell: (i32, i32)) {
+        assert!(self.grid.in_bounds(cell) && !self.grid.is_wall(cell), "place on an open cell");
+        self.agents[agent].position = cell;
+    }
+
     /// Positions of every agent, scripted ones included, in file order.
     pub fn positions(&self) -> Vec<(i32, i32)> {
         self.agents.iter().map(|a| a.position).collect()
@@ -213,7 +226,12 @@ impl GridWorld {
             let mut policy: &crate::behaviours::ChaseShortestPath = &s.chase;
             let observation = policy.observation(from_cell, target_cell);
             let action = policy.act(&observation, &ActionMask::all(4), &mut Rng::new(0));
-            let dir = Direction::from_action(action);
+            let p_random = s.p_random;
+            let mut dir = Direction::from_action(action);
+            // A stochastic chaser sometimes lurches the wrong way.
+            if p_random > 0.0 && self.rng.chance(p_random) {
+                dir = Direction::ALL[self.rng.below(4) as usize];
+            }
             let (dx, dy) = dir.delta();
             let to = (from.0 + dx, from.1 + dy);
             if self.grid.in_bounds(to) && !self.grid.is_wall(to) {
@@ -275,9 +293,15 @@ impl World for GridWorld {
                 if self.agents[id].terminated || self.agents[id].truncated {
                     continue;
                 }
-                let dir = Direction::from_action(*action);
-                self.agents[id].last_action = Some(dir as u32);
+                let intended = Direction::from_action(*action);
+                self.agents[id].last_action = Some(intended as u32);
                 let from = self.agents[id].position;
+                // In a windy cell a gust may turn the move 90°, left or right with equal chance.
+                let mut dir = intended;
+                if self.grid.winds[self.grid.index(from)] && self.grid.slip > 0.0 && self.rng.chance(self.grid.slip) {
+                    dir = Direction::ALL[(intended as usize + if self.rng.below(2) == 0 { 3 } else { 1 }) % 4];
+                    events.push(StepEvent::Gust { agent: id, intended: intended as u32, actual: dir as u32 });
+                }
                 let (dx, dy) = dir.delta();
                 let to = (from.0 + dx, from.1 + dy);
                 self.agents[id].facing = dir;
@@ -385,6 +409,7 @@ impl World for GridWorld {
             hazards: cells(&|i| g.hazards[i]),
             lethal: cells(&|i| g.lethal[i]),
             lures: cells(&|i| g.lures[i]),
+            wind: cells(&|i| g.winds[i]),
             agents: self
                 .agents
                 .iter()

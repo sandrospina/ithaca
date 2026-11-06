@@ -94,6 +94,10 @@ pub enum UiElement {
     Compare,
     /// The Observation Builder inside CONFIGURE.
     Observation,
+    /// The move tester in the Q-values panel: one move tried many times.
+    Outcomes,
+    /// The training wind setting inside CONFIGURE.
+    Wind,
     /// The Q-values of the selected cell.
     QValues,
 }
@@ -162,6 +166,9 @@ pub struct ExperimentDef {
     /// The agent's observation features, if not the level's default.
     #[serde(default)]
     pub observation: Option<Vec<rl_envs::level::FeatureDef>>,
+    /// The training wind's slip, if not the level's. Tests always sail the level's wind.
+    #[serde(default)]
+    pub wind: Option<f32>,
     pub training_seed: u64,
     pub episodes: u32,
     pub expect: Vec<Expect>,

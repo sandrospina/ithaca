@@ -245,7 +245,7 @@ Levels 14–16 share one **Ithaca arena spec**, as required for the Level 16 dat
 | 1 | Reward terms and observation features as catalogues, even if only two of each exist. |
 | 3 (Level 2) | Hazards, lures, reward editor writes `reward` weights. |
 | 4 (Level 3) | Scripted behaviours as `PolicyProvider`s. Observation Builder writes `observation`. Spec hashes on policies. *Done: `chase_shortest_path`, learners first then scripted agents, spawn cells picked by the seed, the `caught_by_opponent` term and termination, `PlayerEdits` checked in `crates/rl-envs/src/edits.rs`.* |
-| 5–7 | Wind, darkness, sensors, beacons, frame stacking. |
+| 5–7 | Wind, darkness, sensors, beacons, frame stacking. *Wind done (Level 4): `Wind` cells, the level's `wind: (slip)`, `player_editable.wind` for training; tests sail the level's slip. `chase_shortest_path(p_random)` for a stochastic chaser.* |
 | Before 8 | Sea engine in fixed point. Re-express one grid level in the Sea engine as a regression test. |
 | 14 (Level 12) | Generators with parameter distributions. |
 | Later | In-browser level editor. |
